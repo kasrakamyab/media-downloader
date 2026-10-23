@@ -1,0 +1,65 @@
+# Dev and prod use this same file; deploy/compose.prod.yml layers restart policies and
+# log rotation on top. Scale a worker with: docker compose up -d --scale worker-youtube=2
+
+x-service: &service
+  build: .
+  image: media-bot:local
+  env_file: .env
+  environment:
+    REDIS_URL: redis://redis:6379/0
+  depends_on:
+    redis:
+      condition: service_healthy
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "100mb", "--maxmemory-policy", "allkeys-lru", "--save", "600", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 128m
+
+  gateway:
+    <<: *service
+    command: ["python", "-m", "gateway.main"]
+    ports:
+      - "8080:8080"
+    mem_limit: 256m
+
+  worker-youtube:
+    <<: *service
+    command: ["arq", "workers.youtube.worker.WorkerSettings"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WORKER_CONCURRENCY: ${YT_CONCURRENCY:-3}
+    volumes:
+      - ./secrets:/secrets:ro
+    mem_limit: 512m
+
+  worker-instagram:
+    <<: *service
+    command: ["arq", "workers.instagram.worker.WorkerSettings"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WORKER_CONCURRENCY: ${IG_CONCURRENCY:-4}
+    volumes:
+      - ./secrets:/secrets:ro
+    mem_limit: 384m
+
+  worker-pinterest:
+    <<: *service
+    command: ["arq", "workers.pinterest.worker.WorkerSettings"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WORKER_CONCURRENCY: ${PIN_CONCURRENCY:-4}
+    volumes:
+      - ./secrets:/secrets:ro
+    mem_limit: 256m
+
+volumes:
+  redis-data:

@@ -1,0 +1,58 @@
+"""Settings loaded from the environment (and a local `.env` in development)."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    bot_token: str = Field(default="", alias="BOT_TOKEN")
+    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    telegram_api_url: str | None = Field(default=None, alias="TELEGRAM_API_URL")
+
+    # Gateway
+    mode: Literal["polling", "webhook"] = Field(default="polling", alias="MODE")
+    webhook_url: str = Field(default="", alias="WEBHOOK_URL")
+    webhook_secret: str = Field(default="", alias="WEBHOOK_SECRET")
+    webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")
+    webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
+    max_active_jobs: int = Field(default=2, alias="MAX_ACTIVE_JOBS")
+    hourly_limit: int = Field(default=20, alias="HOURLY_LIMIT")
+    admin_ids: str = Field(default="", alias="ADMIN_IDS")  # comma-separated user ids
+
+    # Workers
+    max_file_mb: int = Field(default=48, alias="MAX_FILE_MB")
+    job_dir: str = Field(default="/tmp/jobs", alias="JOB_DIR")
+    worker_concurrency: int = Field(default=3, alias="WORKER_CONCURRENCY")
+    extract_timeout: int = Field(default=30, alias="EXTRACT_TIMEOUT")
+    download_timeout: int = Field(default=120, alias="DOWNLOAD_TIMEOUT")
+    job_ttl: int = Field(default=600, alias="JOB_TTL")  # seconds a queued job stays valid
+    rate_limit: str | None = Field(default=None, alias="DOWNLOAD_RATE_LIMIT")  # e.g. "5M"
+    min_free_gb: float = Field(default=1.0, alias="MIN_FREE_GB")
+    cache_ttl_days: int = Field(default=30, alias="CACHE_TTL_DAYS")
+    heartbeat_ttl: int = Field(default=60, alias="HEARTBEAT_TTL")
+    yt_cookies_file: str | None = Field(default=None, alias="YT_COOKIES_FILE")
+    ig_cookies_file: str | None = Field(default=None, alias="IG_COOKIES_FILE")
+    pin_cookies_file: str | None = Field(default=None, alias="PIN_COOKIES_FILE")
+
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_json: bool = Field(default=False, alias="LOG_JSON")
+
+    @property
+    def max_file_bytes(self) -> int:
+        return self.max_file_mb * 1024 * 1024
+
+    @property
+    def admin_id_set(self) -> set[int]:
+        return {int(x) for x in self.admin_ids.split(",") if x.strip().isdigit()}
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

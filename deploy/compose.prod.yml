@@ -1,0 +1,44 @@
+# Production overlay. Usage on the VPS:
+#   docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d
+# Gateway runs in webhook mode; Caddy terminates TLS and proxies /webhook to it.
+
+x-prod: &prod
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  redis:
+    <<: *prod
+  gateway:
+    <<: *prod
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MODE: webhook
+    ports: []
+    expose:
+      - "8080"
+  worker-youtube:
+    <<: *prod
+  worker-instagram:
+    <<: *prod
+  worker-pinterest:
+    <<: *prod
+
+  caddy:
+    <<: *prod
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - gateway
+
+volumes:
+  caddy-data:

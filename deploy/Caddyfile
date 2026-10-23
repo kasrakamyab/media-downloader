@@ -1,0 +1,10 @@
+# Replace bot.example.com with your domain; Caddy fetches the TLS certificate itself.
+bot.example.com {
+	handle /webhook {
+		reverse_proxy gateway:8080
+	}
+	handle /health {
+		reverse_proxy gateway:8080
+	}
+	respond 404
+}
