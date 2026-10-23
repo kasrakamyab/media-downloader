@@ -10,11 +10,14 @@ each step gets one spec in `docs/` that lists the files you may touch.
 
 ## Layout
 ```
-core/        shared package: contracts, detector, settings, cache, limits, health, telegram,
-             worker (the pattern), extractors (yt-dlp / gallery-dl wrappers)
-gateway/     aiogram bot (handlers.py, main.py)
+core/        shared package: contracts, detector, settings, cache, limits, health, breaker,
+             telegram, healthserver, worker (the pattern), extractors (yt-dlp / gallery-dl)
+gateway/     aiogram bot (handlers.py, alerts.py, main.py)
 workers/     one package per platform, each is ~20 lines: an `extract()` + WorkerSettings
-deploy/      prod compose overlay, Caddyfile
+             (+ a `probe()` where the platform offers a quality choice)
+deploy/      prod compose overlay, Caddyfile, Redis backup script
+scripts/     loadtest.py
+docs/        status.md (step checklist), deploy.md, loadtest-report.md, one spec per new step
 tests/       pytest; fakeredis stands in for Redis, FakeSender for Telegram
 ```
 

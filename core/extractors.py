@@ -10,7 +10,7 @@ import asyncio
 import re
 from pathlib import Path
 
-from core.contracts import ErrorCode, Quality
+from core.contracts import ErrorCode, FormatOption, Quality
 from core.settings import Settings
 from core.worker import ExtractError, collect_files
 
@@ -110,6 +110,94 @@ async def ytdlp_download(
         # yt-dlp silently skips files over max_filesize: try the next rung.
         last = ExtractError(ErrorCode.TOO_LARGE, f"{rung} over size cap")
     raise last or ExtractError(ErrorCode.UNKNOWN, "ladder exhausted")
+
+
+def _fmt_size(f: dict, duration: float | None) -> int | None:
+    size = f.get("filesize") or f.get("filesize_approx")
+    if size:
+        return int(size)
+    tbr = f.get("tbr")
+    if tbr and duration:
+        return int(tbr * 1000 / 8 * duration)
+    return None
+
+
+def formats_from_info(info: dict) -> list[FormatOption]:
+    """Turn yt-dlp's `formats` list into the quality menu: one entry per distinct rung."""
+    formats = [f for f in info.get("formats") or [] if f.get("format_id")]
+    duration = info.get("duration")
+    audio_only = [
+        f
+        for f in formats
+        if f.get("vcodec") in (None, "none") and f.get("acodec") not in (None, "none")
+    ]
+    best_audio = max(audio_only, key=lambda f: f.get("abr") or f.get("tbr") or 0, default=None)
+    audio_size = _fmt_size(best_audio, duration) if best_audio else None
+
+    options: list[FormatOption] = []
+    seen_heights: set[int] = set()
+    for quality, cap in (
+        (Quality.P1080, 1080),
+        (Quality.P720, 720),
+        (Quality.P480, 480),
+        (Quality.P360, 360),
+    ):
+        vids = [
+            f
+            for f in formats
+            if f.get("vcodec") not in (None, "none") and 0 < (f.get("height") or 0) <= cap
+        ]
+        if not vids:
+            continue
+        top = max(vids, key=lambda f: ((f.get("height") or 0), f.get("tbr") or 0))
+        height = int(top["height"])
+        if height in seen_heights:
+            continue  # e.g. a 720p-max video: the 1080p rung would just repeat 720p
+        seen_heights.add(height)
+        size = _fmt_size(top, duration)
+        if size is not None and top.get("acodec") in (None, "none") and audio_size:
+            size += audio_size  # video-only stream gets muxed with the audio stream
+        options.append(FormatOption(quality=quality, size_bytes=size, height=height))
+    if best_audio:
+        options.append(FormatOption(quality=Quality.AUDIO, size_bytes=audio_size))
+    return options
+
+
+def _ytdlp_probe_sync(url: str, settings: Settings, cookies: str | None) -> tuple[list, str | None]:
+    import yt_dlp
+
+    opts: dict = {
+        "noplaylist": True,
+        "skip_download": True,
+        "socket_timeout": settings.extract_timeout,
+        "quiet": True,
+        "no_warnings": True,
+        "playlist_items": "1",
+    }
+    if cookies:
+        opts["cookiefile"] = cookies
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError as e:
+        raise ExtractError(classify(str(e)), str(e)) from e
+    if info and info.get("_type") == "playlist":
+        entries = info.get("entries") or []
+        info = entries[0] if entries else {}
+    return formats_from_info(info or {}), (info or {}).get("title")
+
+
+async def ytdlp_probe(
+    url: str, settings: Settings, cookies: str | None = None
+) -> tuple[list[FormatOption], str | None]:
+    """List available qualities without downloading. Raises ExtractError."""
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_ytdlp_probe_sync, url, settings, cookies),
+            timeout=settings.extract_timeout + 5,
+        )
+    except TimeoutError as e:
+        raise ExtractError(ErrorCode.SOURCE_DOWN, "probe timeout") from e
 
 
 # ---- gallery-dl ---------------------------------------------------------------------

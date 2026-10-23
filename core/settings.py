@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     max_active_jobs: int = Field(default=2, alias="MAX_ACTIVE_JOBS")
     hourly_limit: int = Field(default=20, alias="HOURLY_LIMIT")
     admin_ids: str = Field(default="", alias="ADMIN_IDS")  # comma-separated user ids
+    quality_choice_timeout: int = Field(default=60, alias="QUALITY_CHOICE_TIMEOUT")
+    probe_cache_ttl: int = Field(default=600, alias="PROBE_CACHE_TTL")
+    alert_after_open_s: int = Field(default=1800, alias="ALERT_AFTER_OPEN_S")
+
+    # Resilience
+    breaker_threshold: int = Field(default=5, alias="BREAKER_THRESHOLD")
+    breaker_window: int = Field(default=600, alias="BREAKER_WINDOW")
+    breaker_open_for: int = Field(default=900, alias="BREAKER_OPEN_FOR")
+    transient_retries: int = Field(default=1, alias="TRANSIENT_RETRIES")
+    retry_backoff: float = Field(default=2.0, alias="RETRY_BACKOFF")
+    health_port: int = Field(default=8081, alias="HEALTH_PORT")  # 0 disables
 
     # Workers
     max_file_mb: int = Field(default=48, alias="MAX_FILE_MB")
