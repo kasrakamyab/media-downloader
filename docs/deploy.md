@@ -97,14 +97,19 @@ proxy listening on the host. The gateway and workers use it for every Bot API ca
 an inline `# comment` becomes part of the value. Keep comments on their own lines. Settings
 strip the common cases, but the fix is the file.
 
-**YouTube: "Sign in to confirm you're not a bot".** YouTube asks this of data-center and
-VPN IPs. The fix that needs no account is the `pot-provider` sidecar in `docker-compose.yml`
-(bgutil): it mints proof-of-origin tokens and the yt-dlp plugin attaches them. Check it is
-running (`docker compose ps pot-provider`) and that the worker log doesn't say the plugin
-couldn't reach it. If the sidecar is up and YouTube still insists, add `YT_COOKIES_FILE`
-from a throwaway Google account (below). The image ships `deno`, which yt-dlp needs for
-YouTube's JavaScript challenges; a "No supported JavaScript runtime" warning means an old
-image — rebuild.
+**YouTube: "Sign in to confirm you're not a bot".** Two different walls look the same:
+
+- *Residential IP, occasional wall*: the `pot-provider` sidecar (bgutil) handles it. It
+  mints proof-of-origin tokens and the yt-dlp plugin attaches them; no account needed.
+  Check `docker compose ps pot-provider`.
+- *Data-center or VPN exit IP* (any cloud box, most VPNs): YouTube rejects the very first
+  player request by IP, before any token is asked for — `docker compose logs pot-provider`
+  shows no requests at all. PO tokens cannot help here. **You need `YT_COOKIES_FILE`** from
+  a throwaway Google account (export steps below). Mount it read-only as usual; the worker
+  hands yt-dlp a private writable copy per job, so `./secrets` stays untouched.
+
+The image ships `deno`, which yt-dlp needs for YouTube's JavaScript challenges; a "No
+supported JavaScript runtime" warning means an old image — rebuild.
 
 **"That platform wants a login" (`LOGIN_REQUIRED`).** Instagram refuses almost everything
 without a session (the worker then tries yt-dlp, which gets public reels but not photo

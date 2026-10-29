@@ -11,7 +11,7 @@ def test_pot_provider_and_proxy_are_passed_to_ytdlp(settings) -> None:
         "youtubepot-bgutilhttp": {"base_url": ["http://pot-provider:4416"]}
     }
     assert opts["proxy"] == "socks5://proxy:1080"
-    assert opts["cookiefile"] == "/secrets/yt.txt"
+    assert "cookiefile" not in opts  # callers pass a writable copy, never the original
     assert opts["noplaylist"] is True
 
 
