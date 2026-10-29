@@ -5,6 +5,7 @@ import time
 from core.breaker import Breaker, open_key
 from core.contracts import Platform
 from core.health import beat
+from core.worker import flag_login_required
 from gateway.alerts import check_once
 
 
@@ -67,6 +68,17 @@ async def test_alerts_down_and_back(redis, settings) -> None:
     await beat(redis, Platform.INSTAGRAM, 60)
     msgs = await check_once(redis, b, settings)
     assert sorted(msgs) == ["🟢 Instagram is back.", "🟢 YouTube is back."]
+
+
+async def test_alert_login_required(redis, settings) -> None:
+    b = Breaker(redis)
+    for p in Platform:
+        await beat(redis, p, 60)
+    await flag_login_required(redis, Platform.INSTAGRAM, "HTTP redirect to login page")
+    msgs = await check_once(redis, b, settings)
+    assert len(msgs) == 1 and msgs[0].startswith("🔑 Instagram is asking for a login")
+    assert "redirect to login page" in msgs[0]
+    assert await check_once(redis, b, settings) == []  # flag consumed
 
 
 async def test_alert_long_open(redis, settings) -> None:

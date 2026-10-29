@@ -5,7 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     bot_token: str = Field(default="", alias="BOT_TOKEN")
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     telegram_api_url: str | None = Field(default=None, alias="TELEGRAM_API_URL")
+    # Proxies: TELEGRAM_PROXY for the Bot API (http://, socks5://), DOWNLOAD_PROXY for
+    # yt-dlp / gallery-dl / short-link resolution. Both optional and independent.
+    telegram_proxy: str | None = Field(default=None, alias="TELEGRAM_PROXY")
+    download_proxy: str | None = Field(default=None, alias="DOWNLOAD_PROXY")
 
     # Gateway
     mode: Literal["polling", "webhook"] = Field(default="polling", alias="MODE")
@@ -54,6 +58,32 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")
+
+    @field_validator(
+        "telegram_api_url",
+        "telegram_proxy",
+        "download_proxy",
+        "rate_limit",
+        "yt_cookies_file",
+        "ig_cookies_file",
+        "pin_cookies_file",
+        mode="before",
+    )
+    @classmethod
+    def _blank_is_none(cls, v: object) -> object:
+        """Docker's env_file hands us `KEY=` as "" and keeps inline `# comments` as part
+        of the value, so treat blanks and comment-only values as unset."""
+        if isinstance(v, str):
+            v = v.split(" #", 1)[0].strip() if not v.lstrip().startswith("#") else ""
+            return v or None
+        return v
+
+    @field_validator("telegram_api_url", "telegram_proxy", "download_proxy", "webhook_url")
+    @classmethod
+    def _must_be_url(cls, v: str | None) -> str | None:
+        if v and not v.startswith(("http://", "https://", "socks5://", "socks4://")):
+            raise ValueError(f"expected a URL, got {v!r}")
+        return v
 
     @property
     def max_file_bytes(self) -> int:

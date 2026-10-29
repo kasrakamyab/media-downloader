@@ -14,6 +14,7 @@ from core.contracts import Platform
 from core.health import is_alive
 from core.logging import get_logger
 from core.settings import Settings
+from core.worker import login_flag_key
 
 log = get_logger("gateway.alerts")
 
@@ -56,6 +57,13 @@ async def check_once(redis: Redis, breaker: Breaker, settings: Settings) -> list
             ):
                 mins = int((time.time() - opened) / 60)
                 messages.append(f"⚠️ {LABEL[platform]} breaker has been open for {mins} min.")
+        detail = await redis.getdel(login_flag_key(platform))
+        if detail:
+            detail = detail.decode() if isinstance(detail, bytes) else detail
+            messages.append(
+                f"🔑 {LABEL[platform]} is asking for a login. Users get a 'not set up' reply "
+                f"until a cookies file is mounted (see docs/deploy.md).\n<code>{detail}</code>"
+            )
     return messages
 
 

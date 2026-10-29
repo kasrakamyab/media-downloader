@@ -35,7 +35,7 @@ async def build() -> tuple[Dispatcher, Settings, Bot]:
         raise SystemExit("BOT_TOKEN is not set")
 
     arq = await create_pool(RedisSettings.from_dsn(settings.redis_url))
-    bot = make_bot(settings.bot_token, settings.telegram_api_url)
+    bot = make_bot(settings.bot_token, settings.telegram_api_url, settings.telegram_proxy)
     breaker = Breaker(
         arq, settings.breaker_threshold, settings.breaker_window, settings.breaker_open_for
     )

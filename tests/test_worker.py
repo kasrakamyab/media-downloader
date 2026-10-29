@@ -84,6 +84,16 @@ async def test_extract_error_reports_code(redis, settings) -> None:
     assert await redis.get("limits:active:20") is None
 
 
+async def test_login_required_flags_admin_alert(redis, settings) -> None:
+    async def extractor(job, dest, settings):
+        raise ExtractError(ErrorCode.LOGIN_REQUIRED, "HTTP redirect to login page")
+
+    result, sender = await _run(make_job(), extractor, redis, settings)
+    assert result.error_code is ErrorCode.LOGIN_REQUIRED
+    assert "not set up" in sender.finished[0][2]
+    assert await redis.get("needs_login:youtube") == b"HTTP redirect to login page"
+
+
 async def test_too_large(redis, settings) -> None:
     async def extractor(job, dest, settings):
         f = dest / "big.mp4"
@@ -159,6 +169,16 @@ def test_classify() -> None:
     assert classify("ERROR: Unsupported URL: https://x") is ErrorCode.UNSUPPORTED_URL
     assert classify("HTTP Error 429: Too Many Requests") is ErrorCode.RATE_LIMITED
     assert classify("Private video. Sign in if you've been granted access") is ErrorCode.PRIVATE
+    assert (
+        classify(
+            "[instagram][error] HTTP redirect to login page (https://www.instagram.com/accounts/login/)"
+        )
+        is ErrorCode.LOGIN_REQUIRED
+    )
+    assert classify("Sign in to confirm you're not a bot") is ErrorCode.LOGIN_REQUIRED
+    assert (
+        classify("This video is only available to Music Premium members-only") is ErrorCode.PRIVATE
+    )
     assert classify("Connection timed out") is ErrorCode.SOURCE_DOWN
     assert classify("Unable to connect to proxy: Tunnel failed: 403") is ErrorCode.SOURCE_DOWN
     assert classify("HTTP Error 503: Service Unavailable") is ErrorCode.SOURCE_DOWN

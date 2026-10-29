@@ -137,6 +137,8 @@ async def run_job(
     except ExtractError as e:
         result = Result.error(job.job_id, e.code, _ms(started))
         log_.warning("job_failed", code=e.code, detail=e.detail)
+        if e.code == ErrorCode.LOGIN_REQUIRED:
+            await flag_login_required(redis, job.platform, e.detail)
         await _safe_finish(sender, job, ERROR_MESSAGES[e.code])
         return result
     except Exception:
@@ -156,6 +158,16 @@ async def run_job(
                     log_.error("breaker_opened", platform=job.platform)
         except Exception:
             log_.exception("bookkeeping_failed")
+
+
+def login_flag_key(platform: Platform) -> str:
+    return f"needs_login:{platform}"
+
+
+async def flag_login_required(redis: Redis, platform: Platform, detail: str) -> None:
+    """Tell the gateway's alert loop that this platform is asking for a session (no or
+    expired cookies). Expires on its own so the alert repeats only if the problem persists."""
+    await redis.set(login_flag_key(platform), detail[:200] or "login wall", ex=3600)
 
 
 def _fresh_dir(dest: Path) -> None:
@@ -236,8 +248,16 @@ def build_worker_settings(
         result = await run_probe(url, prober=prober, settings=settings)
         return result.model_dump(mode="json")
 
-    async def heartbeat(ctx: dict[str, Any]) -> None:
-        await beat(ctx["redis"], platform, settings.heartbeat_ttl)
+    async def heartbeat_loop(redis: Redis) -> None:
+        """Independent of arq's job slots: a worker that is merely busy must never read as
+        down. Beats every third of the TTL so one missed beat is still inside it."""
+        interval = max(settings.heartbeat_ttl // 3, 1)
+        while True:
+            try:
+                await beat(redis, platform, settings.heartbeat_ttl)
+            except Exception:
+                log.exception("heartbeat_failed", platform=platform)
+            await asyncio.sleep(interval)
 
     async def janitor(ctx: dict[str, Any]) -> None:
         removed = await asyncio.to_thread(janitor_sweep, Path(settings.job_dir))
@@ -247,7 +267,7 @@ def build_worker_settings(
     async def on_startup(ctx: dict[str, Any]) -> None:
         configure_logging(settings.log_level, settings.log_json)
         await asyncio.to_thread(Path(settings.job_dir).mkdir, parents=True, exist_ok=True)
-        bot = make_bot(settings.bot_token, settings.telegram_api_url)
+        bot = make_bot(settings.bot_token, settings.telegram_api_url, settings.telegram_proxy)
         ctx["bot"] = bot
         ctx["sender"] = TelegramSender(bot)
         ctx["cache"] = FileCache(ctx["redis"], settings.cache_ttl_days)
@@ -258,7 +278,17 @@ def build_worker_settings(
             settings.breaker_window,
             settings.breaker_open_for,
         )
-        await heartbeat(ctx)
+        await beat(ctx["redis"], platform, settings.heartbeat_ttl)
+        ctx["heartbeat"] = asyncio.create_task(heartbeat_loop(ctx["redis"]))
+        cookies = {
+            Platform.YOUTUBE: settings.yt_cookies_file,
+            Platform.INSTAGRAM: settings.ig_cookies_file,
+            Platform.PINTEREST: settings.pin_cookies_file,
+        }[platform]
+        if cookies and not await asyncio.to_thread(Path(cookies).is_file):
+            log.error("cookies_file_missing", platform=platform, path=cookies)
+        elif not cookies and platform == Platform.INSTAGRAM:
+            log.warning("no_cookies", platform=platform, hint="public-only; expect login walls")
         if settings.health_port:
 
             async def health_probe() -> dict[str, Any]:
@@ -272,6 +302,8 @@ def build_worker_settings(
         log.info("worker_started", platform=platform, queue=QUEUE_NAMES[platform])
 
     async def on_shutdown(ctx: dict[str, Any]) -> None:
+        if task := ctx.get("heartbeat"):
+            task.cancel()
         if runner := ctx.get("health"):
             await runner.cleanup()
         bot = ctx.get("bot")
@@ -296,11 +328,8 @@ def build_worker_settings(
                     keep_result=120,
                 )
             )
-        cron_jobs = [
-            cron(heartbeat, name="heartbeat", second={0, 20, 40}, run_at_startup=True),
-            cron(janitor, name="janitor", minute=set(range(0, 60, 2))),
-        ]
-        log_results = False  # heartbeat would log three lines a minute
+        cron_jobs = [cron(janitor, name="janitor", minute=set(range(0, 60, 2)))]
+        log_results = False
         queue_name = QUEUE_NAMES[platform]
         redis_settings = RedisSettings.from_dsn(settings.redis_url)
         max_jobs = settings.worker_concurrency

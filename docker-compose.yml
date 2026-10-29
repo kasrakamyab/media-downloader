@@ -6,6 +6,7 @@ x-service: &service
   build: .
   image: ${IMAGE:-media-bot:local}
   env_file: .env
+  restart: unless-stopped
   depends_on:
     redis:
       condition: service_healthy
@@ -35,6 +36,8 @@ services:
     command: ["python", "-m", "gateway.main"]
     environment:
       REDIS_URL: redis://redis:6379/0
+      NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api
+      no_proxy: localhost,127.0.0.1,redis,telegram-bot-api
     ports:
       - "8080:8080"
     healthcheck:
@@ -50,6 +53,8 @@ services:
     command: ["arq", "workers.youtube.worker.WorkerSettings"]
     environment:
       REDIS_URL: redis://redis:6379/0
+      NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api
+      no_proxy: localhost,127.0.0.1,redis,telegram-bot-api
       WORKER_CONCURRENCY: ${YT_CONCURRENCY:-3}
     volumes:
       - ./secrets:/secrets:ro
@@ -61,6 +66,8 @@ services:
     command: ["arq", "workers.instagram.worker.WorkerSettings"]
     environment:
       REDIS_URL: redis://redis:6379/0
+      NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api
+      no_proxy: localhost,127.0.0.1,redis,telegram-bot-api
       WORKER_CONCURRENCY: ${IG_CONCURRENCY:-4}
     volumes:
       - ./secrets:/secrets:ro
@@ -72,6 +79,8 @@ services:
     command: ["arq", "workers.pinterest.worker.WorkerSettings"]
     environment:
       REDIS_URL: redis://redis:6379/0
+      NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api
+      no_proxy: localhost,127.0.0.1,redis,telegram-bot-api
       WORKER_CONCURRENCY: ${PIN_CONCURRENCY:-4}
     volumes:
       - ./secrets:/secrets:ro

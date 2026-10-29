@@ -85,6 +85,36 @@ Workers upload to the local server over HTTP; nothing else changes.
 - `/health` on every container: gateway on 8080 (`platforms.*.alive`, `breaker_open`),
   workers on 8081. Compose restarts a container that fails its healthcheck.
 
+## Troubleshooting
+
+**Telegram is blocked on this network.** Set `TELEGRAM_PROXY` in `.env` to an HTTP or
+SOCKS5 proxy the containers can reach, e.g. `socks5://host.docker.internal:10808` for a
+proxy listening on the host. The gateway and workers use it for every Bot API call. Use
+`DOWNLOAD_PROXY` separately if YouTube/Instagram/Pinterest are blocked too. Never set
+`HTTP_PROXY`/`HTTPS_PROXY` in `.env`: they hit Redis and the healthchecks as well.
+
+**`.env` values look wrong (`#%20http://…` in an error).** Docker's env_file is not shell:
+an inline `# comment` becomes part of the value. Keep comments on their own lines. Settings
+strip the common cases, but the fix is the file.
+
+**"That platform wants a login" (`LOGIN_REQUIRED`).** Instagram refuses almost everything
+without a session; YouTube does it from data-center IPs ("Sign in to confirm you're not a
+bot"). The admin gets a 🔑 alert with the exact message. Fix: export cookies from a browser
+where a throwaway account is logged in (any "Get cookies.txt" extension, Netscape format),
+put the file in `./secrets/` and set `IG_COOKIES_FILE=/secrets/instagram.txt` (or
+`YT_COOKIES_FILE`). Use an account you don't care about; export from a private window and
+don't keep using that session in the browser, or the cookies rotate and expire. When the
+cookies die, the same 🔑 alert tells you.
+
+**"X is temporarily unavailable" but the worker is running.** The gateway checks the
+worker's heartbeat (`heartbeat:<platform>` in Redis, 60 s TTL) and the breaker. Check
+`docker compose ps` (restart loops), `docker compose logs worker-x`, and `/stats`. A breaker
+opens after 5 transient failures in 10 min and closes itself after 15.
+
+**Instagram worked on the laptop but not on the VPS.** Data-center IPs are blocked more
+aggressively. Cookies first; a residential proxy for that worker only (`DOWNLOAD_PROXY` in
+a per-service `environment:` override) second.
+
 ## Scaling (step 13)
 
 | Signal | Move |

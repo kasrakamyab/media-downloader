@@ -33,6 +33,7 @@ class Quality(StrEnum):
 class ErrorCode(StrEnum):
     UNSUPPORTED_URL = "UNSUPPORTED_URL"
     PRIVATE = "PRIVATE"
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"  # the platform wants a session; the bot has no cookies
     TOO_LARGE = "TOO_LARGE"
     RATE_LIMITED = "RATE_LIMITED"
     SOURCE_DOWN = "SOURCE_DOWN"
@@ -44,7 +45,11 @@ ERROR_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.UNSUPPORTED_URL: (
         "I can't handle that link. Send a YouTube, Instagram or Pinterest URL."
     ),
-    ErrorCode.PRIVATE: "That content is private or needs a login, so I can't fetch it.",
+    ErrorCode.PRIVATE: "That content is private, so I can't fetch it.",
+    ErrorCode.LOGIN_REQUIRED: (
+        "That platform wants a login for this content and I'm not set up with one yet. "
+        "The admin has been notified."
+    ),
     ErrorCode.TOO_LARGE: "That file is too large for me to send over Telegram.",
     ErrorCode.RATE_LIMITED: "The source is rate-limiting us right now. Try again in a few minutes.",
     ErrorCode.SOURCE_DOWN: "The source didn't respond. Try again in a few minutes.",

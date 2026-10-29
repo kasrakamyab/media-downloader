@@ -22,10 +22,15 @@ PHOTO_MAX_BYTES = 10 * 1024 * 1024  # Telegram compresses photos; above this sen
 MEDIA_GROUP_MAX = 10
 
 
-def make_bot(token: str, api_url: str | None = None) -> Bot:
-    session = None
+def make_bot(token: str, api_url: str | None = None, proxy: str | None = None) -> Bot:
+    """Bot client. `api_url` points at a self-hosted Bot API server; `proxy` (http:// or
+    socks5://) routes Bot API traffic through a proxy for networks where Telegram is blocked."""
+    kwargs: dict = {}
     if api_url:
-        session = AiohttpSession(api=TelegramAPIServer.from_base(api_url.rstrip("/")))
+        kwargs["api"] = TelegramAPIServer.from_base(api_url.rstrip("/"))
+    if proxy:
+        kwargs["proxy"] = proxy
+    session = AiohttpSession(**kwargs) if kwargs else None
     return Bot(token=token, session=session, default=DefaultBotProperties(parse_mode="HTML"))
 
 

@@ -12,6 +12,7 @@ dependencies = [
     "redis>=5.0",
     "yt-dlp>=2024.8",
     "gallery-dl>=1.27",
+    "aiohttp-socks>=0.9",  # socks5:// support for TELEGRAM_PROXY
 ]
 
 [project.optional-dependencies]
