@@ -111,9 +111,12 @@ strip the common cases, but the fix is the file.
 The image ships `deno`, which yt-dlp needs for YouTube's JavaScript challenges; a "No
 supported JavaScript runtime" warning means an old image — rebuild.
 
-**"That platform wants a login" (`LOGIN_REQUIRED`).** Instagram refuses almost everything
-without a session (the worker then tries yt-dlp, which gets public reels but not photo
-posts or carousels). The admin gets a 🔑 alert with the exact message. Fix: export cookies from a browser
+**"That platform wants a login" (`LOGIN_REQUIRED`).** Without a session the Instagram
+worker tries, in order, yt-dlp (public reels), the public *embed page*
+(`/p/<id>/embed/captioned/`, which carries photo and carousel media without any login) and
+gallery-dl. Public posts should therefore work with no cookies; the login reply means the
+post is private, age-gated or the embed page itself was refused (rate limit from a data-center
+IP). The admin gets a 🔑 alert with the exact message. Fix: export cookies from a browser
 where a throwaway account is logged in (any "Get cookies.txt" extension, Netscape format),
 put the file in `./secrets/` and set `IG_COOKIES_FILE=/secrets/instagram.txt` (or
 `YT_COOKIES_FILE`). Use an account you don't care about; export from a private window and
