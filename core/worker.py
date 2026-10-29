@@ -39,7 +39,15 @@ from core.healthserver import start_health_server
 from core.limits import UserLimits
 from core.logging import configure_logging, get_logger
 from core.settings import Settings, get_settings
-from core.telegram import DeliveryError, ForbiddenError, Sender, TelegramSender, make_bot
+from core.telegram import (
+    REACT_DONE,
+    REACT_FAILED,
+    DeliveryError,
+    ForbiddenError,
+    Sender,
+    TelegramSender,
+    make_bot,
+)
 
 log = get_logger("worker")
 
@@ -235,17 +243,30 @@ async def run_probe(url: str, *, prober: Prober, settings: Settings) -> ProbeRes
 
 
 async def _finish_ok(sender: Sender, job: Job) -> None:
-    if job.message_id:  # 0 = no placeholder (auto mode in groups)
+    if job.react_message_id:  # progress shown as a reaction on the user's message
+        await sender.react(job.chat_id, job.react_message_id, REACT_DONE)
+    if job.message_id:  # 0 = no placeholder (reactions, or auto mode in groups)
         await sender.finish(job.chat_id, job.message_id, None)
 
 
 async def _safe_finish(sender: Sender, job: Job, text: str) -> None:
-    """Tell the user why it failed — unless the job is quiet (auto mode), where a failure
-    is only logged so the bot never adds noise to a group it wasn't asked in."""
-    if job.quiet or not job.message_id:
-        return
+    """Tell the user why it failed: 👎 on their message when reactions are in use, plus the
+    one-line reason — unless the job is quiet (auto mode), where the reason is only logged
+    so the bot never adds noise to a group it wasn't asked in."""
     try:
-        await sender.finish(job.chat_id, job.message_id, f"❌ {text}")
+        if job.react_message_id:
+            await sender.react(job.chat_id, job.react_message_id, REACT_FAILED)
+        if job.quiet:
+            return
+        if job.message_id:
+            await sender.finish(job.chat_id, job.message_id, f"❌ {text}")
+        elif job.react_message_id:
+            await sender.say(
+                job.chat_id,
+                f"❌ {text}",
+                reply_to=job.react_message_id,
+                thread_id=job.thread_id,
+            )
     except Exception:
         log.exception("finish_failed", job_id=job.job_id)
 
