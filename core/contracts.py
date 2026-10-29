@@ -35,6 +35,7 @@ class ErrorCode(StrEnum):
     PRIVATE = "PRIVATE"
     LOGIN_REQUIRED = "LOGIN_REQUIRED"  # the platform wants a session; the bot has no cookies
     TOO_LARGE = "TOO_LARGE"
+    UPLOAD_FAILED = "UPLOAD_FAILED"  # downloaded fine, Telegram upload timed out / dropped
     RATE_LIMITED = "RATE_LIMITED"
     SOURCE_DOWN = "SOURCE_DOWN"
     UNKNOWN = "UNKNOWN"
@@ -51,6 +52,10 @@ ERROR_MESSAGES: dict[ErrorCode, str] = {
         "The admin has been notified."
     ),
     ErrorCode.TOO_LARGE: "That file is too large for me to send over Telegram.",
+    ErrorCode.UPLOAD_FAILED: (
+        "I downloaded it, but the upload to Telegram timed out (slow connection). "
+        "Try again, or pick a lower quality."
+    ),
     ErrorCode.RATE_LIMITED: "The source is rate-limiting us right now. Try again in a few minutes.",
     ErrorCode.SOURCE_DOWN: "The source didn't respond. Try again in a few minutes.",
     ErrorCode.UNKNOWN: "Something went wrong while fetching that. Try again later.",
