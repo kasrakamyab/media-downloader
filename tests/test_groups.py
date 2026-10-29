@@ -21,6 +21,7 @@ from core.worker import run_job
 from gateway.handlers import (
     WORKING,
     extract_ask,
+    group_help,
     on_help,
     on_migrate,
     on_my_chat_member,
@@ -163,29 +164,79 @@ async def test_private_chat_unchanged(arq, deps) -> None:
     assert job.chat_type == "private" and job.reply_to_message_id is None
 
 
-async def test_group_help(settings) -> None:
-    m = FakeMessage("/help", chat_type="group")
-    await on_help(m, settings, bot_username=BOT)
-    assert m.replies and f"@{BOT}" in m.replies[0]
+async def test_group_help_depends_on_what_the_bot_can_see(settings) -> None:
+    m = FakeMessage("/help", chat_id=-5, chat_type="group")
+    await on_help(m, settings, FakeBot(), bot_username=BOT)  # plain member
+    assert (
+        "Make me an admin" in m.replies[0] and f"@{BOT} &lt;link&gt;</code>\n" not in m.replies[0]
+    )
+    assert "/dl &lt;link&gt;" in m.replies[0]
+
+    m = FakeMessage("/help", chat_id=-5, chat_type="group")
+    await on_help(m, settings, FakeBot(admin_in={-5}), bot_username=BOT)  # admin here
+    assert f"• <code>@{BOT} &lt;link&gt;</code>" in m.replies[0]
+    assert "auto-download" in m.replies[0] and "Make me an admin" not in m.replies[0]
+
+    m = FakeMessage("/help", chat_id=-5, chat_type="group")
+    await on_help(m, settings, FakeBot(), bot_username=BOT, bot_can_read_all=True)  # privacy off
+    assert f"• <code>@{BOT} &lt;link&gt;</code>" in m.replies[0]
+
+
+def test_group_help_text_shapes() -> None:
+    plain = group_help(BOT, can_see=False, joined=True)
+    assert plain.startswith("👋 Thanks for adding me.") and "Make me an admin" in plain
+    assert "• <code>@" not in plain  # mention not promised when Telegram won't deliver it
+    admin = group_help(BOT, can_see=True)
+    assert not admin.startswith("👋") and f"• <code>@{BOT}" in admin
 
 
 # ---- membership and migration -----------------------------------------------------------
 
 
-async def test_my_chat_member_add_and_remove(redis) -> None:
+async def test_my_chat_member_add_promote_demote_remove(redis) -> None:
     groups = GroupRegistry(redis)
     bot = FakeBot()
     await on_my_chat_member(member_update(-1, "left", "member"), bot, groups, bot_username=BOT)
     assert await groups.is_member(-1) and await groups.count() == 1
     info = await groups.get(-1)
-    assert info["title"] == "Test group" and info["added_by"] == "7"
-    assert bot.sent and f"@{BOT}" in bot.sent[0][1]
+    assert info["title"] == "Test group" and info["added_by"] == "7" and info["can_see"] == "0"
+    assert bot.sent[0][1].startswith("👋") and "Make me an admin" in bot.sent[0][1]
+    assert "• <code>@" not in bot.sent[0][1]
 
-    await on_my_chat_member(member_update(-1, "member", "administrator"), bot, groups)
-    assert len(bot.sent) == 1  # promotion is not a new greeting
+    await on_my_chat_member(
+        member_update(-1, "member", "administrator"), bot, groups, bot_username=BOT
+    )
+    assert (await groups.get(-1))["can_see"] == "1"
+    assert len(bot.sent) == 2 and "Thanks for making me an admin" in bot.sent[1][1]
+    assert f"@{BOT} &lt;link&gt;" in bot.sent[1][1]
 
-    await on_my_chat_member(member_update(-1, "administrator", "kicked"), bot, groups)
+    await on_my_chat_member(member_update(-1, "administrator", "member"), bot, groups)
+    assert (await groups.get(-1))["can_see"] == "0"
+    assert len(bot.sent) == 3 and "lost admin rights" in bot.sent[2][1]
+
+    await on_my_chat_member(member_update(-1, "member", "kicked"), bot, groups)
     assert not await groups.is_member(-1) and await groups.get(-1) is None
+
+
+async def test_added_directly_as_admin_or_with_privacy_off(redis) -> None:
+    groups = GroupRegistry(redis)
+    bot = FakeBot()
+    await on_my_chat_member(
+        member_update(-3, "left", "administrator"), bot, groups, bot_username=BOT
+    )
+    assert (await groups.get(-3))["can_see"] == "1"
+    assert f"• <code>@{BOT}" in bot.sent[0][1] and "Make me an admin" not in bot.sent[0][1]
+
+    bot2 = FakeBot()
+    await on_my_chat_member(
+        member_update(-4, "left", "member"), bot2, groups, bot_username=BOT, bot_can_read_all=True
+    )
+    assert (await groups.get(-4))["can_see"] == "1" and f"• <code>@{BOT}" in bot2.sent[0][1]
+    # demotion with privacy off changes nothing visible
+    await on_my_chat_member(
+        member_update(-4, "administrator", "member"), bot2, groups, bot_can_read_all=True
+    )
+    assert len(bot2.sent) == 1
 
 
 async def test_my_chat_member_ignores_private_and_greeting_failure(redis) -> None:

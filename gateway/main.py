@@ -61,6 +61,7 @@ async def build() -> tuple[Dispatcher, Settings, Bot]:
     dp["cache"] = FileCache(arq, settings.cache_ttl_days)
     dp["groups"] = GroupRegistry(arq)
     dp["bot_username"] = ""
+    dp["bot_can_read_all"] = False
 
     @dp.startup()
     async def _start_alerts() -> None:
@@ -74,7 +75,15 @@ async def build() -> tuple[Dispatcher, Settings, Bot]:
             try:
                 me = await bot.get_me()
                 dp["bot_username"] = me.username or ""
-                log.info("bot_identity", username=me.username, id=me.id)
+                # False with BotFather privacy mode on (the default): plain group messages
+                # then reach us only in groups where the bot is an admin.
+                dp["bot_can_read_all"] = bool(me.can_read_all_group_messages)
+                log.info(
+                    "bot_identity",
+                    username=me.username,
+                    id=me.id,
+                    can_read_all_group_messages=dp["bot_can_read_all"],
+                )
                 return
             except TelegramNetworkError as e:
                 log.warning("get_me_failed", attempt=attempt + 1, error=str(e)[:100])

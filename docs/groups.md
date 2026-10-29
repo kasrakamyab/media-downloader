@@ -7,9 +7,16 @@
 | `/setjoingroups` | **Enable** | otherwise nobody can add the bot to a group |
 | `/setprivacy` | **Enable** (the default) | the bot receives only commands, replies to its own messages and service messages — not everything people write |
 
+**Make the bot an admin of the group.** With privacy mode on (the default), Telegram only
+delivers `/commands` and replies to the bot's own messages — not plain links or `@mentions`.
+An admin bot receives everything, which is what `@bot <link>` and auto-download need. The
+greeting says so: as a plain member it asks to be made an admin and lists only `/dl`; once
+promoted it thanks you and lists mentions and auto-download. (Alternatively turn privacy
+mode off in BotFather for every group at once; the bot detects either.)
+
 The bot also needs the right to **send media** in the group. In restricted groups an admin
-grants it under the bot's member permissions (or promotes it). Without it the bot replies
-"I'm not allowed to send media in this chat" and the job is dropped.
+grants it under the bot's member permissions. Without it the bot replies "I'm not allowed to
+send media in this chat" and the job is dropped.
 
 ## How people use it in a group
 

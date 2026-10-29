@@ -61,11 +61,18 @@ class FakeQuery:
 
 
 class FakeBot:
-    def __init__(self) -> None:
+    id = 6408937369
+
+    def __init__(self, admin_in: set[int] | None = None) -> None:
         self.sent: list[tuple[int, str]] = []
+        self.admin_in = admin_in or set()  # chats where the bot itself is an admin
 
     async def send_message(self, chat_id: int, text: str, **_) -> None:
         self.sent.append((chat_id, text))
+
+    async def get_chat_member(self, chat_id: int, user_id: int) -> SimpleNamespace:
+        status = "administrator" if chat_id in self.admin_in else "member"
+        return SimpleNamespace(status=status, user=SimpleNamespace(id=user_id))
 
 
 def member_update(

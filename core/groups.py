@@ -149,6 +149,10 @@ class GroupRegistry:
         await pipe.execute()
         return True
 
+    async def set_visibility(self, chat_id: int, can_see: bool) -> None:
+        """Whether Telegram delivers plain messages to us here (admin / privacy off)."""
+        await self._redis.hset(group_key(chat_id), "can_see", "1" if can_see else "0")
+
     async def get(self, chat_id: int) -> dict[str, str] | None:
         raw = await self._redis.hgetall(group_key(chat_id))
         return _decode(raw) if raw else None
