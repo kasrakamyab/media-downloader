@@ -26,6 +26,10 @@ Then message the bot:
 - an Instagram post / reel / carousel or a Pinterest pin / board → the media, up to 10 items
 - `/stats` (admins) → queue depth, success/error counts, cache hit rate, breaker state
 
+In groups the bot acts only when asked — `/dl <link>`, or reply to a message with `/dl` —
+and replies to the message that had the link. Group admins get `/settings` (auto-download,
+max quality, platforms). See `docs/groups.md`.
+
 `docker compose logs -f worker-youtube` shows the extractor at work; `docker compose stop
 worker-youtube` shows the degradation message within 60 s.
 

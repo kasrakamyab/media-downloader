@@ -234,3 +234,4 @@ async def test_stats_admin_only(arq, deps) -> None:
     deps["settings"].admin_ids = "1"
     await on_stats(m, deps["settings"], arq, deps["breaker"])
     assert "YouTube" in m.answers[0] and "🟢" in m.answers[0]
+    assert "in groups: ok=0 err=0" in m.answers[0] and "Total" in m.answers[0]

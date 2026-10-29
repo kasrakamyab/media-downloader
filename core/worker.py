@@ -170,7 +170,9 @@ async def run_job(
         shutil.rmtree(dest, ignore_errors=True)
         try:
             await limits.release(job.user_id, job.chat_id if job.is_group else None)
-            await record_result(redis, job.platform, result)  # type: ignore[possibly-undefined]
+            await record_result(  # type: ignore[possibly-undefined]
+                redis, job.platform, result, "group" if job.is_group else "private"
+            )
             if result.status == "ok":
                 await breaker.record_success(job.platform)
             elif result.error_code in TRANSIENT_ERRORS:

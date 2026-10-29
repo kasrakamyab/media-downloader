@@ -20,6 +20,12 @@ to be run from a machine with network access (`make dev`, send the bot a link).
 | 11 | Server release: GHCR image, ssh deploy, weekly rebuild, backups | done — needs a VPS and secrets |
 | 12 | /stats, admin alerts, log shipping notes | done |
 | 13 | Scaling moves | documented in `docs/deploy.md` |
+| G1 | Groups: join/leave tracking, migration, `/dl` / reply / mention triggers, in-context replies, media-rights errors | done — needs a live check |
+| G2 | `/settings` for group admins: auto-download, max quality, platforms | done — needs a live check |
+| G3 | Per-group hourly limit and in-flight cap (fairness), silent refusals in auto mode | done |
+| G4 | `/stats` split private vs group, group counts, docs | done |
+
+See `docs/groups.md` for the group-chat behaviour and BotFather settings.
 
 Open questions from the roadmap: bot `@username` (reserve with BotFather), default quality
 (currently best under the cap), Instagram cookies policy (public-only until a cookies file is
