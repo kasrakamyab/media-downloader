@@ -169,7 +169,7 @@ async def run_job(
     finally:
         shutil.rmtree(dest, ignore_errors=True)
         try:
-            await limits.release(job.user_id)
+            await limits.release(job.user_id, job.chat_id if job.is_group else None)
             await record_result(redis, job.platform, result)  # type: ignore[possibly-undefined]
             if result.status == "ok":
                 await breaker.record_success(job.platform)
@@ -300,7 +300,13 @@ def build_worker_settings(
         ctx["bot"] = bot
         ctx["sender"] = TelegramSender(bot, settings.upload_timeout, settings.upload_seconds_per_mb)
         ctx["cache"] = FileCache(ctx["redis"], settings.cache_ttl_days)
-        ctx["limits"] = UserLimits(ctx["redis"], settings.max_active_jobs, settings.hourly_limit)
+        ctx["limits"] = UserLimits(
+            ctx["redis"],
+            settings.max_active_jobs,
+            settings.hourly_limit,
+            chat_max_active=settings.max_active_per_chat,
+            chat_hourly=settings.group_hourly_limit,
+        )
         ctx["breaker"] = Breaker(
             ctx["redis"],
             settings.breaker_threshold,

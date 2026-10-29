@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     webhook_port: int = Field(default=8080, alias="WEBHOOK_PORT")
     max_active_jobs: int = Field(default=2, alias="MAX_ACTIVE_JOBS")
     hourly_limit: int = Field(default=20, alias="HOURLY_LIMIT")
+    # Per group chat, on top of the per-user limits: jobs in flight and requests per hour.
+    max_active_per_chat: int = Field(default=2, alias="MAX_ACTIVE_PER_CHAT")
+    group_hourly_limit: int = Field(default=60, alias="GROUP_HOURLY_LIMIT")
     admin_ids: str = Field(default="", alias="ADMIN_IDS")  # comma-separated user ids
     quality_choice_timeout: int = Field(default=60, alias="QUALITY_CHOICE_TIMEOUT")
     probe_cache_ttl: int = Field(default=600, alias="PROBE_CACHE_TTL")
