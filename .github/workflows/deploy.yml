@@ -1,0 +1,80 @@
+# Build the image, push it to GHCR, then ssh to the VPS and `compose pull && up -d`.
+# Also runs weekly so yt-dlp / gallery-dl stay current (the Dockerfile installs the latest).
+#
+# Repository secrets needed: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (private key whose
+# public half is in ~/.ssh/authorized_keys on the VPS), DEPLOY_PATH (e.g. /opt/media-bot).
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 4 * * 1" # Mondays 04:23 UTC: weekly rebuild with fresh extractors
+  workflow_dispatch:
+
+concurrency: deploy
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/media-bot
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" && ruff check . && pytest -q
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        run: echo "tag=$(date -u +%Y%m%d%H%M)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+      # Smoke test the freshly built image before it goes live: extractors import and
+      # the detector works. (A real round-trip needs a bot token; see docs/deploy.md.)
+      - run: |
+          docker run --rm ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }} \
+            python -c "import yt_dlp, gallery_dl; from core.detector import detect; print(yt_dlp.version.__version__, detect('https://youtu.be/dQw4w9WgXcQ'))"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ secrets.DEPLOY_HOST != '' }}
+    steps:
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Roll out
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new "$USER@$HOST" bash -s <<EOF
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            git fetch -q origin main && git reset -q --hard origin/main
+            # keep the previous tag around so rollback is one command (see docs/deploy.md)
+            grep -q '^IMAGE=' .env && sed -i "s|^IMAGE=.*|IMAGE=${IMAGE}:${TAG}|" .env || echo "IMAGE=${IMAGE}:${TAG}" >> .env
+            docker compose -f docker-compose.yml -f deploy/compose.prod.yml pull -q
+            docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d --remove-orphans
+            docker image prune -f >/dev/null
+            sleep 15
+            curl -fsS http://localhost:8080/health >/dev/null || docker compose -f docker-compose.yml -f deploy/compose.prod.yml logs --tail=50 gateway
+          EOF

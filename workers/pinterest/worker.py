@@ -22,14 +22,14 @@ log = get_logger("worker.pinterest")
 BOARD_MAX_ITEMS = 10
 
 
-async def resolve_short_link(url: str, timeout_s: int) -> str:
+async def resolve_short_link(url: str, timeout_s: int, proxy: str | None = None) -> str:
     """Follow pin.it redirects to the canonical pinterest.com URL."""
     if "pin.it/" not in url:
         return url
     try:
         async with (
             aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as session,
-            session.head(url, allow_redirects=True) as resp,
+            session.head(url, allow_redirects=True, proxy=proxy) as resp,
         ):
             final = str(resp.url)
     except (aiohttp.ClientError, TimeoutError) as e:
@@ -41,7 +41,7 @@ async def resolve_short_link(url: str, timeout_s: int) -> str:
 
 
 async def extract(job: Job, dest: Path, settings: Settings) -> list[Path]:
-    url = await resolve_short_link(job.url, settings.extract_timeout)
+    url = await resolve_short_link(job.url, settings.extract_timeout, settings.download_proxy)
     cookies = settings.pin_cookies_file
     try:
         return await gallerydl_download(url, dest, settings, cookies, max_items=BOARD_MAX_ITEMS)

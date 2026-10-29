@@ -33,6 +33,7 @@ class Quality(StrEnum):
 class ErrorCode(StrEnum):
     UNSUPPORTED_URL = "UNSUPPORTED_URL"
     PRIVATE = "PRIVATE"
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"  # the platform wants a session; the bot has no cookies
     TOO_LARGE = "TOO_LARGE"
     RATE_LIMITED = "RATE_LIMITED"
     SOURCE_DOWN = "SOURCE_DOWN"
@@ -44,7 +45,11 @@ ERROR_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.UNSUPPORTED_URL: (
         "I can't handle that link. Send a YouTube, Instagram or Pinterest URL."
     ),
-    ErrorCode.PRIVATE: "That content is private or needs a login, so I can't fetch it.",
+    ErrorCode.PRIVATE: "That content is private, so I can't fetch it.",
+    ErrorCode.LOGIN_REQUIRED: (
+        "That platform wants a login for this content and I'm not set up with one yet. "
+        "The admin has been notified."
+    ),
     ErrorCode.TOO_LARGE: "That file is too large for me to send over Telegram.",
     ErrorCode.RATE_LIMITED: "The source is rate-limiting us right now. Try again in a few minutes.",
     ErrorCode.SOURCE_DOWN: "The source didn't respond. Try again in a few minutes.",
@@ -60,6 +65,11 @@ QUEUE_NAMES: dict[Platform, str] = {
 
 # Name of the arq function every worker registers.
 JOB_FUNCTION = "process_job"
+# Cheap format listing, registered only by workers whose platform offers a quality choice.
+PROBE_FUNCTION = "probe"
+
+# Transient errors: the worker retries these with backoff, and they count toward the breaker.
+TRANSIENT_ERRORS = frozenset({ErrorCode.SOURCE_DOWN})
 
 
 def new_job_id() -> str:
@@ -100,3 +110,29 @@ class Result(BaseModel):
     @classmethod
     def error(cls, job_id: str, code: ErrorCode, took_ms: int) -> Result:
         return cls(job_id=job_id, status="error", error_code=code, took_ms=took_ms)
+
+
+class FormatOption(BaseModel):
+    """One entry of the quality menu, as reported by a probe."""
+
+    quality: Quality
+    size_bytes: int | None = None  # None when the source doesn't say
+    height: int | None = None
+
+    @property
+    def label(self) -> str:
+        name = "Audio only" if self.quality == Quality.AUDIO else self.quality.value
+        if self.size_bytes is None:
+            return name
+        mb = self.size_bytes / (1024 * 1024)
+        return f"{name} · {mb:.0f} MB" if mb >= 10 else f"{name} · {mb:.1f} MB"
+
+
+class ProbeResult(BaseModel):
+    """Answer to a probe. `formats` is empty when the probe failed; see `error_code`."""
+
+    url: str
+    formats: list[FormatOption] = Field(default_factory=list)
+    title: str | None = None
+    error_code: ErrorCode | None = None
+    took_ms: int = 0

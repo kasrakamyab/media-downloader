@@ -1,5 +1,5 @@
-# Replace bot.example.com with your domain; Caddy fetches the TLS certificate itself.
-bot.example.com {
+# DOMAIN comes from .env; Caddy fetches and renews the TLS certificate itself.
+{$DOMAIN} {
 	handle /webhook {
 		reverse_proxy gateway:8080
 	}

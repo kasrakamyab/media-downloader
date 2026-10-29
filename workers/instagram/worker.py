@@ -23,6 +23,8 @@ async def extract(job: Job, dest: Path, settings: Settings) -> list[Path]:
     except ExtractError as e:
         if e.code in {ErrorCode.PRIVATE, ErrorCode.RATE_LIMITED}:
             raise
+        # LOGIN_REQUIRED falls through on purpose: yt-dlp reaches public reels through
+        # different endpoints and sometimes succeeds where gallery-dl hits the login wall.
         log.info("gallerydl_failed_trying_ytdlp", job_id=job.job_id, code=e.code)
         try:
             return await ytdlp_download(job.url, dest, Quality.BEST, settings, cookies)
