@@ -39,7 +39,7 @@ from core.healthserver import start_health_server
 from core.limits import UserLimits
 from core.logging import configure_logging, get_logger
 from core.settings import Settings, get_settings
-from core.telegram import DeliveryError, Sender, TelegramSender, make_bot
+from core.telegram import DeliveryError, ForbiddenError, Sender, TelegramSender, make_bot
 
 log = get_logger("worker")
 
@@ -109,7 +109,16 @@ async def run_job(
 
         cached = await cache.get(job.url, job.quality)
         if cached:
-            await sender.send_cached(job.chat_id, cached, None)
+            try:
+                await sender.send_cached(
+                    job.chat_id,
+                    cached,
+                    None,
+                    reply_to=job.reply_to_message_id,
+                    thread_id=job.thread_id,
+                )
+            except ForbiddenError as e:
+                raise ExtractError(ErrorCode.FORBIDDEN, str(e)) from e
             await sender.finish(job.chat_id, job.message_id, None)
             result = Result.ok(job.job_id, cached, _ms(started), cached=True)
             log_.info("served_from_cache", took_ms=result.took_ms)
@@ -128,7 +137,15 @@ async def run_job(
             raise ExtractError(ErrorCode.TOO_LARGE, too_big[0].name)
 
         try:
-            file_ids = await sender.send_files(job.chat_id, files, None)
+            file_ids = await sender.send_files(
+                job.chat_id,
+                files,
+                None,
+                reply_to=job.reply_to_message_id,
+                thread_id=job.thread_id,
+            )
+        except ForbiddenError as e:
+            raise ExtractError(ErrorCode.FORBIDDEN, str(e)) from e
         except DeliveryError as e:
             raise ExtractError(ErrorCode.UPLOAD_FAILED, str(e)) from e
         await cache.set(job.url, job.quality, file_ids)

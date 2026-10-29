@@ -1,5 +1,10 @@
 """Telegram handlers. The gateway never downloads: detect -> availability -> limits ->
-placeholder -> (quality keyboard for YouTube) -> enqueue."""
+placeholder -> (quality keyboard for YouTube) -> enqueue.
+
+Private chats: any message with a link is a request. Groups: only explicit asks are —
+`/dl <link>`, `/dl` as a reply to a message with a link, or `@bot <link>` — and the result
+replies to the message that carried the link, inside its forum topic if any.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +12,18 @@ import asyncio
 import contextlib
 import json
 import time
+from dataclasses import dataclass
 
-from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from arq.connections import ArqRedis
 from pydantic import BaseModel
 
@@ -28,6 +40,7 @@ from core.contracts import (
     Quality,
 )
 from core.detector import UnsupportedURL, detect, find_urls
+from core.groups import GroupRegistry
 from core.health import is_alive, stats
 from core.limits import UserLimits
 from core.logging import get_logger
@@ -43,6 +56,9 @@ PLATFORM_LABEL = {
 }
 # Platforms whose worker answers probes; the others have one quality and skip the keyboard.
 PROBE_PLATFORMS = {Platform.YOUTUBE}
+GROUP_TYPES = {"group", "supergroup"}
+MEMBER_STATUSES = {"member", "administrator", "restricted", "creator"}
+GONE_STATUSES = {"left", "kicked"}
 
 WORKING = "⏳ Working on it…"
 HELP = (
@@ -53,8 +69,17 @@ HELP = (
     "• Instagram: public posts, reels and carousels (up to 10 items)\n"
     "• Pinterest: pins and short boards (up to 10 items)\n\n"
     "Add <code>audio</code> after a YouTube link to skip the menu and get just the sound.\n\n"
+    "In groups I only act when asked: <code>/dl &lt;link&gt;</code>, reply to a message that "
+    "has a link with <code>/dl</code>, or mention me with the link.\n\n"
     "Limits: {active} downloads at a time, {hourly} per hour.\n"
     "For personal use only. Private content is refused."
+)
+GROUP_HELP = (
+    "👋 Thanks for adding me. In this group I act only when asked:\n"
+    "• <code>/dl &lt;link&gt;</code>\n"
+    "• reply to a message that has a link with <code>/dl</code>\n"
+    "• <code>@{bot} &lt;link&gt;</code>\n"
+    "I reply to the message that had the link. Add <code>audio</code> for sound only."
 )
 
 
@@ -66,12 +91,68 @@ class PendingChoice(BaseModel):
     offered: list[Quality]
 
 
+@dataclass(frozen=True, slots=True)
+class Ask:
+    """A message that asks us for a download: the text to search and the message to reply to."""
+
+    text: str
+    source: Message
+
+
 def pending_key(job_id: str) -> str:
     return f"pending:{job_id}"
 
 
 def probe_key(url: str) -> str:
     return f"probe:{url_hash(url)}"
+
+
+def is_group(message: Message) -> bool:
+    return message.chat.type in GROUP_TYPES
+
+
+def message_text(message: Message) -> str:
+    """Text or caption, plus the targets of any text_link entities (hidden links)."""
+    text = message.text or message.caption or ""
+    for ent in (message.entities or []) + (message.caption_entities or []):
+        if ent.type == "text_link" and ent.url:
+            text += " " + ent.url
+    return text
+
+
+def extract_ask(message: Message, bot_username: str) -> Ask | None:
+    """Decide whether a message asks for a download.
+
+    Private chat: anything with a link. Group: only `/dl`, a reply with `/dl`, or a mention.
+    Returns None when the bot should stay silent.
+    """
+    text = message_text(message)
+    if not is_group(message):
+        return Ask(text, message)
+    lowered = text.lower()
+    is_command = lowered.startswith("/dl")
+    mentioned = bool(bot_username) and f"@{bot_username.lower()}" in lowered
+    if not (is_command or mentioned):
+        return None
+    if find_urls(text):
+        return Ask(text, message)
+    reply = message.reply_to_message
+    if reply:
+        quoted = message_text(reply)
+        if find_urls(quoted):
+            return Ask(quoted + " " + text, reply)  # keep e.g. the `audio` keyword
+    return Ask(text, message)  # asked, but no link: on_text answers with a hint
+
+
+async def say(message: Message, text: str, *, reply: bool | None = None) -> Message | None:
+    """Reply in groups (keeps context), plain answer in private chats. Never raises."""
+    try:
+        if reply if reply is not None else is_group(message):
+            return await message.reply(text)
+        return await message.answer(text)
+    except (TelegramForbiddenError, TelegramBadRequest) as e:
+        log.warning("cannot_reply", chat_id=message.chat.id, error=str(e)[:120])
+        return None
 
 
 async def platform_available(arq: ArqRedis, breaker: Breaker, platform: Platform) -> bool:
@@ -96,17 +177,29 @@ def _help(settings: Settings) -> str:
 
 
 @router.message(CommandStart())
-async def on_start(message: Message, settings: Settings) -> None:
+async def on_start(message: Message, settings: Settings, bot_username: str = "") -> None:
+    if is_group(message):
+        await say(message, GROUP_HELP.format(bot=bot_username or "bot"))
+        return
     await message.answer("👋 Hi! " + _help(settings))
 
 
 @router.message(Command("help"))
-async def on_help(message: Message, settings: Settings) -> None:
+async def on_help(message: Message, settings: Settings, bot_username: str = "") -> None:
+    if is_group(message):
+        await say(message, GROUP_HELP.format(bot=bot_username or "bot"))
+        return
     await message.answer(_help(settings))
 
 
 @router.message(Command("stats"))
-async def on_stats(message: Message, settings: Settings, arq: ArqRedis, breaker: Breaker) -> None:
+async def on_stats(
+    message: Message,
+    settings: Settings,
+    arq: ArqRedis,
+    breaker: Breaker,
+    groups: GroupRegistry | None = None,
+) -> None:
     if not message.from_user or message.from_user.id not in settings.admin_id_set:
         return
     lines = []
@@ -129,10 +222,48 @@ async def on_stats(message: Message, settings: Settings, arq: ArqRedis, breaker:
             f"<b>{PLATFORM_LABEL[platform]}</b> — {state}\n"
             f"   queue={depth} ok={ok} err={err} cache hits={rate}"
         )
+    if groups is not None:
+        lines.append(f"<b>Groups</b>: {await groups.count()}")
     await message.answer("\n".join(lines))
 
 
-@router.message(F.text)
+# ---- membership -----------------------------------------------------------------------
+
+
+@router.my_chat_member()
+async def on_my_chat_member(
+    event: ChatMemberUpdated, bot: Bot, groups: GroupRegistry, bot_username: str = ""
+) -> None:
+    chat = event.chat
+    if chat.type not in GROUP_TYPES:
+        return  # private block/unblock, channels: nothing to track yet
+    old, new = event.old_chat_member.status, event.new_chat_member.status
+    if new in MEMBER_STATUSES and old not in MEMBER_STATUSES:
+        await groups.add(chat.id, chat.title or "", chat.type, event.from_user.id)
+        log.info("group_joined", chat_id=chat.id, title=chat.title, by=event.from_user.id)
+        try:
+            await bot.send_message(chat.id, GROUP_HELP.format(bot=bot_username or "bot"))
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            log.info("group_greeting_failed", chat_id=chat.id, error=str(e)[:120])
+    elif new in GONE_STATUSES and old not in GONE_STATUSES:
+        await groups.remove(chat.id)
+        log.info("group_left", chat_id=chat.id, title=chat.title, status=new)
+    elif new == "administrator" and old != "administrator":
+        log.info("group_promoted", chat_id=chat.id, title=chat.title)
+
+
+@router.message(F.migrate_to_chat_id)
+async def on_migrate(message: Message, groups: GroupRegistry) -> None:
+    """Group became a supergroup: Telegram gives it a new chat id."""
+    new_id = message.migrate_to_chat_id
+    if new_id and await groups.migrate(message.chat.id, new_id):
+        log.info("group_migrated", old=message.chat.id, new=new_id)
+
+
+# ---- download requests ----------------------------------------------------------------
+
+
+@router.message(F.text | F.caption)
 async def on_text(
     message: Message,
     settings: Settings,
@@ -140,52 +271,67 @@ async def on_text(
     limits: UserLimits,
     cache: FileCache,
     breaker: Breaker,
+    bot_username: str = "",
 ) -> None:
     if not message.from_user:
         return
-    urls = find_urls(message.text or "")
+    ask = extract_ask(message, bot_username)
+    if ask is None:
+        return  # a group message that isn't for us
+    urls = find_urls(ask.text)
     if not urls:
-        await message.answer("Send me a link to a YouTube video, Instagram post or Pinterest pin.")
+        await say(
+            message,
+            "Send me a link to a YouTube video, Instagram post or Pinterest pin."
+            if not is_group(message)
+            else "Give me a link: <code>/dl &lt;link&gt;</code>, or reply to one with /dl.",
+        )
         return
 
     try:
         found = detect(urls[0])
     except UnsupportedURL:
-        await message.answer(
-            "I can't handle that link yet. I support YouTube, Instagram and Pinterest."
+        await say(
+            message, "I can't handle that link yet. I support YouTube, Instagram and Pinterest."
         )
         return
 
     quality = Quality.BEST
-    if found.platform == Platform.YOUTUBE and "audio" in (message.text or "").lower().split():
+    if found.platform == Platform.YOUTUBE and "audio" in ask.text.lower().split():
         quality = Quality.AUDIO
 
     if await cache.is_blocked(found.url):
-        await message.answer("That link has been blocked on this bot.")
+        await say(message, "That link has been blocked on this bot.")
         return
 
     if not await platform_available(arq, breaker, found.platform):
         others = [
             p for p in Platform if p != found.platform and await platform_available(arq, breaker, p)
         ]
-        await message.answer(unavailable_text(found.platform, others))
+        await say(message, unavailable_text(found.platform, others))
         return
 
     reason = await limits.try_acquire(message.from_user.id)
     if reason == "hourly":
-        await message.answer(
+        await say(
+            message,
             f"You've hit the limit of {settings.hourly_limit} requests per hour. "
-            "Try again a bit later."
+            "Try again a bit later.",
         )
         return
     if reason == "active":
-        await message.answer(
+        await say(
+            message,
             f"You already have {settings.max_active_jobs} downloads running. "
-            "Wait for them to finish first."
+            "Wait for them to finish first.",
         )
         return
 
-    placeholder = await message.reply(WORKING)
+    placeholder = await say(ask.source, WORKING, reply=True)  # always attached to the link
+    if placeholder is None:  # can't even post text here: nothing more we can do
+        await limits.release(message.from_user.id)
+        return
+    group = is_group(message)
     job = Job(
         chat_id=message.chat.id,
         user_id=message.from_user.id,
@@ -193,6 +339,9 @@ async def on_text(
         url=found.url,
         platform=found.platform,
         quality=quality,
+        chat_type=message.chat.type,
+        reply_to_message_id=ask.source.message_id if group else None,
+        thread_id=message.message_thread_id if (group and message.is_topic_message) else None,
     )
 
     # A cached answer for the default quality skips the menu: the worker serves it instantly.
@@ -299,7 +448,7 @@ async def on_quality_chosen(
         await arq.set(
             pending_key(job_id), pending.model_dump_json(), ex=settings.quality_choice_timeout
         )
-        await query.answer("Only the person who sent the link can choose.")
+        await query.answer("Only the person who asked can choose.")
         return
     pending.job.quality = quality if quality in pending.offered else pending.default
     await query.answer()
@@ -337,6 +486,13 @@ async def _enqueue(
     except Exception:
         log.exception("enqueue_failed", job_id=job.job_id)
         await limits.release(job.user_id)
-        await placeholder.edit_text("❌ Couldn't queue that right now. Try again in a minute.")
+        with contextlib.suppress(TelegramBadRequest, TelegramForbiddenError):
+            await placeholder.edit_text("❌ Couldn't queue that right now. Try again in a minute.")
         return
-    log.info("job_enqueued", job_id=job.job_id, platform=job.platform, quality=job.quality)
+    log.info(
+        "job_enqueued",
+        job_id=job.job_id,
+        platform=job.platform,
+        quality=job.quality,
+        chat_type=job.chat_type,
+    )

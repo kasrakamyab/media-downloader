@@ -78,7 +78,7 @@ async def test_network_timeout_becomes_delivery_error(tmp_path: Path) -> None:
 
 
 class TimingOutSender(FakeSender):
-    async def send_files(self, chat_id, files, caption):
+    async def send_files(self, chat_id, files, caption, **_):
         raise DeliveryError("TelegramNetworkError: Request timeout error after 60s, 30000000 B")
 
 
