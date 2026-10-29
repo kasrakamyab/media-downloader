@@ -5,6 +5,7 @@ Workers call `TelegramSender`; tests use `FakeSender` which records calls instea
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -12,8 +13,12 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
+
+from core.logging import get_logger
+
+log = get_logger("telegram")
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
@@ -63,48 +68,105 @@ class Sender(Protocol):
     async def finish(self, chat_id: int, message_id: int, text: str | None) -> None: ...
 
 
+class DeliveryError(Exception):
+    """The file was produced but could not be handed to Telegram (slow link, network)."""
+
+
+def upload_timeout_for(
+    size_bytes: int, seconds_per_mb: float, cap_s: int, floor_s: int = 60
+) -> int:
+    """Request timeout for one upload: aiogram's 60 s default is too short for a 48 MB file
+    on a slow link (0.4 MB/s = 2 min), so scale with size, between a floor and a cap."""
+    mb = size_bytes / (1024 * 1024)
+    return int(min(cap_s, max(floor_s, mb * seconds_per_mb)))
+
+
+def _sizes(files: list[Path]) -> list[int]:
+    return [f.stat().st_size for f in files]
+
+
 class TelegramSender:
-    def __init__(self, bot: Bot) -> None:
+    def __init__(
+        self, bot: Bot, upload_timeout: int = 600, upload_seconds_per_mb: float = 8.0
+    ) -> None:
         self.bot = bot
+        self.upload_timeout = upload_timeout
+        self.upload_seconds_per_mb = upload_seconds_per_mb
+
+    def _timeout(self, size_bytes: int) -> int:
+        return upload_timeout_for(size_bytes, self.upload_seconds_per_mb, self.upload_timeout)
 
     async def send_files(self, chat_id: int, files: list[Path], caption: str | None) -> list[str]:
         files = [f for f in files if f.is_file()][:MEDIA_GROUP_MAX]
         if not files:
             raise RuntimeError("nothing to send")
         kinds = [_kind(f) for f in files]
-        if len(files) > 1 and all(k in {"photo", "video"} for k in kinds):
-            media = []
-            for i, (f, k) in enumerate(zip(files, kinds, strict=True)):
-                cap = caption if i == 0 else None
-                inp = FSInputFile(f)
-                media.append(
-                    InputMediaPhoto(media=inp, caption=cap)
-                    if k == "photo"
-                    else InputMediaVideo(media=inp, caption=cap, supports_streaming=True)
-                )
-            sent = await self.bot.send_media_group(chat_id, media=media)
-            return [_file_id(m) for m in sent]
-
-        ids: list[str] = []
-        for i, (f, k) in enumerate(zip(files, kinds, strict=True)):
-            cap = caption if i == 0 else None
-            ids.append(_file_id(await self._send_one(chat_id, f, k, cap)))
+        sizes = _sizes(files)
+        total = sum(sizes)
+        started = time.monotonic()
+        try:
+            if len(files) > 1 and all(k in {"photo", "video"} for k in kinds):
+                ids = await self._send_group(chat_id, files, kinds, caption, total)
+            else:
+                ids = []
+                for i, (f, k, size) in enumerate(zip(files, kinds, sizes, strict=True)):
+                    cap = caption if i == 0 else None
+                    ids.append(_file_id(await self._send_one(chat_id, f, k, cap, size)))
+        except (TelegramNetworkError, TimeoutError) as e:
+            took = time.monotonic() - started
+            raise DeliveryError(f"{e.__class__.__name__}: {e} after {took:.0f}s, {total} B") from e
+        took = time.monotonic() - started
+        log.info(
+            "upload_done",
+            files=len(files),
+            bytes=total,
+            took_s=round(took, 1),
+            mb_per_s=round(total / (1024 * 1024) / took, 2) if took else None,
+        )
         return ids
 
-    async def _send_one(self, chat_id: int, f: Path, kind: str, caption: str | None) -> Message:
+    async def _send_group(
+        self, chat_id: int, files: list[Path], kinds: list[str], caption: str | None, total: int
+    ) -> list[str]:
+        media = []
+        for i, (f, k) in enumerate(zip(files, kinds, strict=True)):
+            cap = caption if i == 0 else None
+            inp = FSInputFile(f)
+            media.append(
+                InputMediaPhoto(media=inp, caption=cap)
+                if k == "photo"
+                else InputMediaVideo(media=inp, caption=cap, supports_streaming=True)
+            )
+        sent = await self.bot.send_media_group(
+            chat_id, media=media, request_timeout=self._timeout(total)
+        )
+        return [_file_id(m) for m in sent]
+
+    async def _send_one(
+        self, chat_id: int, f: Path, kind: str, caption: str | None, size: int
+    ) -> Message:
         inp = FSInputFile(f)
+        timeout = self._timeout(size)
         try:
             if kind == "photo":
-                return await self.bot.send_photo(chat_id, inp, caption=caption)
+                return await self.bot.send_photo(
+                    chat_id, inp, caption=caption, request_timeout=timeout
+                )
             if kind == "video":
                 return await self.bot.send_video(
-                    chat_id, inp, caption=caption, supports_streaming=True
+                    chat_id,
+                    inp,
+                    caption=caption,
+                    supports_streaming=True,
+                    request_timeout=timeout,
                 )
             if kind == "audio":
-                return await self.bot.send_audio(chat_id, inp, caption=caption)
+                return await self.bot.send_audio(
+                    chat_id, inp, caption=caption, request_timeout=timeout
+                )
         except TelegramBadRequest:
             pass  # e.g. unsupported codec / dimensions -> fall through to document
-        return await self.bot.send_document(chat_id, inp, caption=caption)
+        return await self.bot.send_document(chat_id, inp, caption=caption, request_timeout=timeout)
 
     async def send_cached(self, chat_id: int, file_ids: list[str], caption: str | None) -> None:
         # file_ids are opaque; send_document accepts any kind and Telegram keeps the type.

@@ -120,6 +120,13 @@ put the file in `./secrets/` and set `IG_COOKIES_FILE=/secrets/instagram.txt` (o
 don't keep using that session in the browser, or the cookies rotate and expire. When the
 cookies die, the same 🔑 alert tells you.
 
+**"The upload to Telegram timed out" (`UPLOAD_FAILED`).** The download worked; the push
+to `api.telegram.org` was too slow for the request timeout. The timeout scales with file
+size (`max(60, size_mb × UPLOAD_SECONDS_PER_MB)`, capped at `UPLOAD_TIMEOUT`, defaults
+8 s/MB and 600 s, i.e. ~0.13 MB/s minimum). The worker logs `upload_done` with bytes and
+MB/s for every successful send, so you can see the real throughput and tune. On a VPS the
+self-hosted Bot API server (step 9) uploads over the local network and makes this moot.
+
 **"X is temporarily unavailable" but the worker is running.** The gateway checks the
 worker's heartbeat (`heartbeat:<platform>` in Redis, 60 s TTL) and the breaker. Check
 `docker compose ps` (restart loops), `docker compose logs worker-x`, and `/stats`. A breaker

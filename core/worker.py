@@ -39,7 +39,7 @@ from core.healthserver import start_health_server
 from core.limits import UserLimits
 from core.logging import configure_logging, get_logger
 from core.settings import Settings, get_settings
-from core.telegram import Sender, TelegramSender, make_bot
+from core.telegram import DeliveryError, Sender, TelegramSender, make_bot
 
 log = get_logger("worker")
 
@@ -127,7 +127,10 @@ async def run_job(
         if too_big:
             raise ExtractError(ErrorCode.TOO_LARGE, too_big[0].name)
 
-        file_ids = await sender.send_files(job.chat_id, files, None)
+        try:
+            file_ids = await sender.send_files(job.chat_id, files, None)
+        except DeliveryError as e:
+            raise ExtractError(ErrorCode.UPLOAD_FAILED, str(e)) from e
         await cache.set(job.url, job.quality, file_ids)
         await sender.finish(job.chat_id, job.message_id, None)
         result = Result.ok(job.job_id, file_ids, _ms(started))
@@ -269,7 +272,7 @@ def build_worker_settings(
         await asyncio.to_thread(Path(settings.job_dir).mkdir, parents=True, exist_ok=True)
         bot = make_bot(settings.bot_token, settings.telegram_api_url, settings.telegram_proxy)
         ctx["bot"] = bot
-        ctx["sender"] = TelegramSender(bot)
+        ctx["sender"] = TelegramSender(bot, settings.upload_timeout, settings.upload_seconds_per_mb)
         ctx["cache"] = FileCache(ctx["redis"], settings.cache_ttl_days)
         ctx["limits"] = UserLimits(ctx["redis"], settings.max_active_jobs, settings.hourly_limit)
         ctx["breaker"] = Breaker(

@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     download_timeout: int = Field(default=120, alias="DOWNLOAD_TIMEOUT")
     job_ttl: int = Field(default=600, alias="JOB_TTL")  # seconds a queued job stays valid
     rate_limit: str | None = Field(default=None, alias="DOWNLOAD_RATE_LIMIT")  # e.g. "5M"
+    # Telegram upload request timeout: max(60, size_mb * UPLOAD_SECONDS_PER_MB), capped.
+    upload_timeout: int = Field(default=600, alias="UPLOAD_TIMEOUT")
+    upload_seconds_per_mb: float = Field(default=8.0, alias="UPLOAD_SECONDS_PER_MB")
     min_free_gb: float = Field(default=1.0, alias="MIN_FREE_GB")
     cache_ttl_days: int = Field(default=30, alias="CACHE_TTL_DAYS")
     heartbeat_ttl: int = Field(default=60, alias="HEARTBEAT_TTL")
