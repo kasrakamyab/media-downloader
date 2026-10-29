@@ -5,6 +5,7 @@ Workers call `TelegramSender`; tests use `FakeSender` which records calls instea
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Protocol
@@ -13,8 +14,14 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
-from aiogram.types import FSInputFile, InputMediaPhoto, InputMediaVideo, Message
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
+from aiogram.types import (
+    FSInputFile,
+    InputMediaPhoto,
+    InputMediaVideo,
+    Message,
+    ReplyParameters,
+)
 
 from core.logging import get_logger
 
@@ -60,10 +67,24 @@ def _file_id(msg: Message) -> str:
 
 class Sender(Protocol):
     async def send_files(
-        self, chat_id: int, files: list[Path], caption: str | None
+        self,
+        chat_id: int,
+        files: list[Path],
+        caption: str | None,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
     ) -> list[str]: ...
 
-    async def send_cached(self, chat_id: int, file_ids: list[str], caption: str | None) -> None: ...
+    async def send_cached(
+        self,
+        chat_id: int,
+        file_ids: list[str],
+        caption: str | None,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> None: ...
 
     async def finish(self, chat_id: int, message_id: int, text: str | None) -> None: ...
 
@@ -76,6 +97,33 @@ class DeliveryError(Exception):
     server after the client gave up, and a retry would post the same file twice. There is
     no Bot API call to check whether the first one landed.
     """
+
+
+class ForbiddenError(DeliveryError):
+    """Telegram refused the send for good: bot kicked, or no right to post media here."""
+
+
+_RIGHTS_RE = re.compile(
+    r"not enough rights|have no rights|CHAT_SEND_\w+_FORBIDDEN|CHAT_WRITE_FORBIDDEN|"
+    r"bot was kicked|bot is not a member|chat not found|TOPIC_CLOSED",
+    re.IGNORECASE,
+)
+
+
+def is_rights_error(e: Exception) -> bool:
+    return isinstance(e, TelegramForbiddenError) or bool(_RIGHTS_RE.search(str(e)))
+
+
+def _reply_kwargs(reply_to: int | None, thread_id: int | None) -> dict:
+    kw: dict = {}
+    if reply_to:
+        # allow_sending_without_reply: the original may have been deleted meanwhile.
+        kw["reply_parameters"] = ReplyParameters(
+            message_id=reply_to, allow_sending_without_reply=True
+        )
+    if thread_id:
+        kw["message_thread_id"] = thread_id
+    return kw
 
 
 def upload_timeout_for(
@@ -102,25 +150,38 @@ class TelegramSender:
     def _timeout(self, size_bytes: int) -> int:
         return upload_timeout_for(size_bytes, self.upload_seconds_per_mb, self.upload_timeout)
 
-    async def send_files(self, chat_id: int, files: list[Path], caption: str | None) -> list[str]:
+    async def send_files(
+        self,
+        chat_id: int,
+        files: list[Path],
+        caption: str | None,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> list[str]:
         files = [f for f in files if f.is_file()][:MEDIA_GROUP_MAX]
         if not files:
             raise RuntimeError("nothing to send")
         kinds = [_kind(f) for f in files]
         sizes = _sizes(files)
         total = sum(sizes)
+        where = _reply_kwargs(reply_to, thread_id)
         started = time.monotonic()
         try:
             if len(files) > 1 and all(k in {"photo", "video"} for k in kinds):
-                ids = await self._send_group(chat_id, files, kinds, caption, total)
+                ids = await self._send_group(chat_id, files, kinds, caption, total, where)
             else:
                 ids = []
                 for i, (f, k, size) in enumerate(zip(files, kinds, sizes, strict=True)):
                     cap = caption if i == 0 else None
-                    ids.append(_file_id(await self._send_one(chat_id, f, k, cap, size)))
+                    ids.append(_file_id(await self._send_one(chat_id, f, k, cap, size, where)))
         except (TelegramNetworkError, TimeoutError) as e:
             took = time.monotonic() - started
             raise DeliveryError(f"{e.__class__.__name__}: {e} after {took:.0f}s, {total} B") from e
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            if is_rights_error(e):
+                raise ForbiddenError(str(e)) from e
+            raise
         took = time.monotonic() - started
         log.info(
             "upload_done",
@@ -132,7 +193,13 @@ class TelegramSender:
         return ids
 
     async def _send_group(
-        self, chat_id: int, files: list[Path], kinds: list[str], caption: str | None, total: int
+        self,
+        chat_id: int,
+        files: list[Path],
+        kinds: list[str],
+        caption: str | None,
+        total: int,
+        where: dict,
     ) -> list[str]:
         media = []
         for i, (f, k) in enumerate(zip(files, kinds, strict=True)):
@@ -144,19 +211,19 @@ class TelegramSender:
                 else InputMediaVideo(media=inp, caption=cap, supports_streaming=True)
             )
         sent = await self.bot.send_media_group(
-            chat_id, media=media, request_timeout=self._timeout(total)
+            chat_id, media=media, request_timeout=self._timeout(total), **where
         )
         return [_file_id(m) for m in sent]
 
     async def _send_one(
-        self, chat_id: int, f: Path, kind: str, caption: str | None, size: int
+        self, chat_id: int, f: Path, kind: str, caption: str | None, size: int, where: dict
     ) -> Message:
         inp = FSInputFile(f)
         timeout = self._timeout(size)
         try:
             if kind == "photo":
                 return await self.bot.send_photo(
-                    chat_id, inp, caption=caption, request_timeout=timeout
+                    chat_id, inp, caption=caption, request_timeout=timeout, **where
                 )
             if kind == "video":
                 return await self.bot.send_video(
@@ -165,19 +232,40 @@ class TelegramSender:
                     caption=caption,
                     supports_streaming=True,
                     request_timeout=timeout,
+                    **where,
                 )
             if kind == "audio":
                 return await self.bot.send_audio(
-                    chat_id, inp, caption=caption, request_timeout=timeout
+                    chat_id, inp, caption=caption, request_timeout=timeout, **where
                 )
-        except TelegramBadRequest:
-            pass  # e.g. unsupported codec / dimensions -> fall through to document
-        return await self.bot.send_document(chat_id, inp, caption=caption, request_timeout=timeout)
+        except TelegramBadRequest as e:
+            if is_rights_error(e):
+                raise
+            # e.g. unsupported codec / dimensions -> fall through to document
+        return await self.bot.send_document(
+            chat_id, inp, caption=caption, request_timeout=timeout, **where
+        )
 
-    async def send_cached(self, chat_id: int, file_ids: list[str], caption: str | None) -> None:
+    async def send_cached(
+        self,
+        chat_id: int,
+        file_ids: list[str],
+        caption: str | None,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> None:
         # file_ids are opaque; send_document accepts any kind and Telegram keeps the type.
-        for i, fid in enumerate(file_ids[:MEDIA_GROUP_MAX]):
-            await self.bot.send_document(chat_id, fid, caption=caption if i == 0 else None)
+        where = _reply_kwargs(reply_to, thread_id)
+        try:
+            for i, fid in enumerate(file_ids[:MEDIA_GROUP_MAX]):
+                await self.bot.send_document(
+                    chat_id, fid, caption=caption if i == 0 else None, **where
+                )
+        except (TelegramForbiddenError, TelegramBadRequest) as e:
+            if is_rights_error(e):
+                raise ForbiddenError(str(e)) from e
+            raise
 
     async def finish(self, chat_id: int, message_id: int, text: str | None) -> None:
         try:
@@ -196,18 +284,37 @@ class FakeSender:
         self.sent_files: list[tuple[int, list[Path], str | None]] = []
         self.sent_cached: list[tuple[int, list[str], str | None]] = []
         self.finished: list[tuple[int, int, str | None]] = []
+        self.targets: list[tuple[int | None, int | None]] = []  # (reply_to, thread_id) per send
         self._counter = 0
 
-    async def send_files(self, chat_id: int, files: list[Path], caption: str | None) -> list[str]:
+    async def send_files(
+        self,
+        chat_id: int,
+        files: list[Path],
+        caption: str | None,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> list[str]:
         self.sent_files.append((chat_id, list(files), caption))
+        self.targets.append((reply_to, thread_id))
         ids = []
         for _ in files:
             self._counter += 1
             ids.append(f"fake-file-id-{self._counter}")
         return ids
 
-    async def send_cached(self, chat_id: int, file_ids: list[str], caption: str | None) -> None:
+    async def send_cached(
+        self,
+        chat_id: int,
+        file_ids: list[str],
+        caption: str | None,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> None:
         self.sent_cached.append((chat_id, list(file_ids), caption))
+        self.targets.append((reply_to, thread_id))
 
     async def finish(self, chat_id: int, message_id: int, text: str | None) -> None:
         self.finished.append((chat_id, message_id, text))

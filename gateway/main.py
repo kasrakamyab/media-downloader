@@ -9,6 +9,7 @@ import asyncio
 from typing import Any
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from arq.connections import ArqRedis, RedisSettings, create_pool
@@ -16,6 +17,7 @@ from arq.connections import ArqRedis, RedisSettings, create_pool
 from core.breaker import Breaker
 from core.cache import FileCache
 from core.contracts import Platform
+from core.groups import GroupRegistry
 from core.health import is_alive
 from core.healthserver import start_health_server
 from core.limits import UserLimits
@@ -26,6 +28,9 @@ from gateway.alerts import alert_loop
 from gateway.handlers import router
 
 log = get_logger("gateway")
+
+# my_chat_member: added to / removed from groups. Not delivered unless asked for.
+ALLOWED_UPDATES = ["message", "callback_query", "my_chat_member"]
 
 
 async def build() -> tuple[Dispatcher, Settings, Bot]:
@@ -46,10 +51,27 @@ async def build() -> tuple[Dispatcher, Settings, Bot]:
     dp["breaker"] = breaker
     dp["limits"] = UserLimits(arq, settings.max_active_jobs, settings.hourly_limit)
     dp["cache"] = FileCache(arq, settings.cache_ttl_days)
+    dp["groups"] = GroupRegistry(arq)
+    dp["bot_username"] = ""
 
     @dp.startup()
     async def _start_alerts() -> None:
         dp["alerts"] = asyncio.create_task(alert_loop(bot, arq, breaker, settings))
+
+    @dp.startup()
+    async def _resolve_username() -> None:
+        # Needed to recognise "@bot <link>" in groups. Retried: the first Bot API call
+        # through a proxy has been seen to time out once and then recover.
+        for attempt in range(5):
+            try:
+                me = await bot.get_me()
+                dp["bot_username"] = me.username or ""
+                log.info("bot_identity", username=me.username, id=me.id)
+                return
+            except TelegramNetworkError as e:
+                log.warning("get_me_failed", attempt=attempt + 1, error=str(e)[:100])
+                await asyncio.sleep(2 * (attempt + 1))
+        log.error("bot_username_unknown", hint="mentions in groups won't work until restart")
 
     @dp.shutdown()
     async def _close() -> None:
@@ -85,7 +107,7 @@ async def run_polling() -> None:
     await bot.delete_webhook(drop_pending_updates=False)
     log.info("gateway_started", mode="polling")
     try:
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+        await dp.start_polling(bot, allowed_updates=ALLOWED_UPDATES)
     finally:
         if runner:
             await runner.cleanup()
@@ -101,7 +123,7 @@ def run_webhook() -> None:
         await bot.set_webhook(
             settings.webhook_url,
             secret_token=settings.webhook_secret or None,
-            allowed_updates=["message", "callback_query"],
+            allowed_updates=ALLOWED_UPDATES,
             drop_pending_updates=False,
         )
         log.info("gateway_started", mode="webhook", url=settings.webhook_url)

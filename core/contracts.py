@@ -36,6 +36,7 @@ class ErrorCode(StrEnum):
     LOGIN_REQUIRED = "LOGIN_REQUIRED"  # the platform wants a session; the bot has no cookies
     TOO_LARGE = "TOO_LARGE"
     UPLOAD_FAILED = "UPLOAD_FAILED"  # downloaded fine, Telegram upload timed out / dropped
+    FORBIDDEN = "FORBIDDEN"  # the bot may not send media in this chat (group rights)
     RATE_LIMITED = "RATE_LIMITED"
     SOURCE_DOWN = "SOURCE_DOWN"
     UNKNOWN = "UNKNOWN"
@@ -56,6 +57,10 @@ ERROR_MESSAGES: dict[ErrorCode, str] = {
         "I downloaded it, but the upload to Telegram timed out (slow connection). "
         "It may still show up in the next minute or two; if not, try again or pick a "
         "lower quality."
+    ),
+    ErrorCode.FORBIDDEN: (
+        "I'm not allowed to send media in this chat. An admin needs to give the bot "
+        "permission to send photos and videos."
     ),
     ErrorCode.RATE_LIMITED: "The source is rate-limiting us right now. Try again in a few minutes.",
     ErrorCode.SOURCE_DOWN: "The source didn't respond. Try again in a few minutes.",
@@ -97,6 +102,15 @@ class Job(BaseModel):
     platform: Platform
     quality: Quality = Quality.BEST
     requested_at: datetime = Field(default_factory=utcnow)
+    # Where to deliver. In groups the result replies to the message that carried the link
+    # and stays inside its forum topic; in private chats both are None.
+    chat_type: str = "private"  # private | group | supergroup
+    reply_to_message_id: int | None = None
+    thread_id: int | None = None
+
+    @property
+    def is_group(self) -> bool:
+        return self.chat_type in ("group", "supergroup")
 
 
 class Result(BaseModel):

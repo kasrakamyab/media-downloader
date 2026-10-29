@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from types import SimpleNamespace
 
 import pytest
 from arq.connections import ArqRedis
@@ -24,6 +23,7 @@ from gateway.handlers import (
     pending_key,
     probe_key,
 )
+from tests.fakes import FakeMessage, FakeQuery
 
 YT = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 MENU = [
@@ -31,38 +31,6 @@ MENU = [
     FormatOption(quality=Quality.P360, size_bytes=5_000_000, height=360),
     FormatOption(quality=Quality.AUDIO, size_bytes=1_000_000),
 ]
-
-
-class FakeMessage:
-    def __init__(self, text: str, user_id: int = 7, chat_id: int = 99) -> None:
-        self.text = text
-        self.from_user = SimpleNamespace(id=user_id)
-        self.chat = SimpleNamespace(id=chat_id)
-        self.answers: list[str] = []
-        self.replies: list[str] = []
-        self.markups: list = []
-
-    async def answer(self, text: str, **_) -> None:
-        self.answers.append(text)
-
-    async def reply(self, text: str, **_) -> SimpleNamespace:
-        self.replies.append(text)
-        return SimpleNamespace(message_id=555, edit_text=self._edit)
-
-    async def _edit(self, text: str, reply_markup=None, **_) -> None:
-        self.replies.append(text)
-        self.markups.append(reply_markup)
-
-
-class FakeQuery:
-    def __init__(self, data: str, user_id: int = 7) -> None:
-        self.data = data
-        self.from_user = SimpleNamespace(id=user_id)
-        self.message = None
-        self.answers: list[tuple] = []
-
-    async def answer(self, *args, **kwargs) -> None:
-        self.answers.append((args, kwargs))
 
 
 @pytest.fixture
