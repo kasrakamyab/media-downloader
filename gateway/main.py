@@ -51,7 +51,13 @@ async def build() -> tuple[Dispatcher, Settings, Bot]:
     dp["settings"] = settings
     dp["arq"] = arq
     dp["breaker"] = breaker
-    dp["limits"] = UserLimits(arq, settings.max_active_jobs, settings.hourly_limit)
+    dp["limits"] = UserLimits(
+        arq,
+        settings.max_active_jobs,
+        settings.hourly_limit,
+        chat_max_active=settings.max_active_per_chat,
+        chat_hourly=settings.group_hourly_limit,
+    )
     dp["cache"] = FileCache(arq, settings.cache_ttl_days)
     dp["groups"] = GroupRegistry(arq)
     dp["bot_username"] = ""

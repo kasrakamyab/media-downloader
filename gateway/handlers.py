@@ -331,17 +331,20 @@ async def on_text(
         await tell(unavailable_text(found.platform, others))
         return
 
-    reason = await limits.try_acquire(message.from_user.id)
-    if reason == "hourly":
+    chat_scope = message.chat.id if group else None
+    reason = await limits.try_acquire(message.from_user.id, chat_scope)
+    if reason:
         await tell(
-            f"You've hit the limit of {settings.hourly_limit} requests per hour. "
-            "Try again a bit later."
-        )
-        return
-    if reason == "active":
-        await tell(
-            f"You already have {settings.max_active_jobs} downloads running. "
-            "Wait for them to finish first."
+            {
+                "hourly": f"You've hit the limit of {settings.hourly_limit} requests per hour. "
+                "Try again a bit later.",
+                "active": f"You already have {settings.max_active_jobs} downloads running. "
+                "Wait for them to finish first.",
+                "group_hourly": f"This group has used its {settings.group_hourly_limit} "
+                "downloads for this hour. Try again later.",
+                "group_active": f"This group already has {settings.max_active_per_chat} "
+                "downloads running. Wait for them to finish.",
+            }[reason]
         )
         return
 
@@ -349,7 +352,7 @@ async def on_text(
     if ask.explicit:  # auto mode posts nothing until the media itself
         placeholder = await say(ask.source, WORKING, reply=True)  # attached to the link
         if placeholder is None:  # can't even post text here: nothing more we can do
-            await limits.release(message.from_user.id)
+            await limits.release(message.from_user.id, chat_scope)
             return
     job = Job(
         chat_id=message.chat.id,
@@ -515,7 +518,7 @@ async def _enqueue(
         )
     except Exception:
         log.exception("enqueue_failed", job_id=job.job_id)
-        await limits.release(job.user_id)
+        await limits.release(job.user_id, job.chat_id if job.is_group else None)
         if placeholder is not None:
             with contextlib.suppress(TelegramBadRequest, TelegramForbiddenError):
                 await placeholder.edit_text(

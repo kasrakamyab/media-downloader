@@ -30,6 +30,18 @@ be used by the person who asked; everyone else gets "Only the person who asked c
 
 Per-user limits (2 at a time, 20/hour) apply inside groups exactly as in private chats.
 
+## Limits and fairness
+
+On top of the per-user limits, each group has its own: `MAX_ACTIVE_PER_CHAT` downloads in
+flight (default 2) and `GROUP_HOURLY_LIMIT` requests per hour (default 60), shared by all
+its members. That is the fairness mechanism: a worker with concurrency 3 or 4 can never be
+fully occupied by one group, so private chats and other groups keep getting slots, and the
+queue behind it stays short. Keep `MAX_ACTIVE_PER_CHAT` below each worker's concurrency.
+
+When a group limit is hit, `/dl` gets a one-line reply ("This group already has 2 downloads
+running…"); in auto mode the link is skipped silently. The refusal holds nothing: a user
+turned away by a group limit can still download in a private chat.
+
 ## Per-group settings (`/settings`, admins only)
 
 | Setting | Default | Effect |
@@ -54,5 +66,5 @@ shows the count.
 | --- | --- | --- |
 | G1 | Join/leave tracking, migration, `/dl` / reply / mention triggers, in-context replies, media-rights errors | done |
 | G2 | `/settings` for group admins: auto-download on/off, max quality, allowed platforms; auto mode needs privacy off or admin and skips the quality menu | done |
-| G3 | Per-group hourly limits, per-chat concurrency cap so one busy group can't starve others, quiet failures in auto mode | |
+| G3 | Per-group hourly limits, per-chat concurrency cap so one busy group can't starve others, quiet failures in auto mode | done |
 | G4 | `/stats` split private vs group, group count in alerts, docs polish | |
