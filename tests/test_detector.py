@@ -62,6 +62,17 @@ CASES: list[tuple[str, Platform, str]] = [
         Platform.PINTEREST,
         "https://www.pinterest.com/pin/123456789012345678/",
     ),
+    # what pin.it share links actually redirect to
+    (
+        "https://www.pinterest.com/pin/636907572345689110/sent/?invite_code=abc123&sender=42&sfo=1",
+        Platform.PINTEREST,
+        "https://www.pinterest.com/pin/636907572345689110/",
+    ),
+    (
+        "https://www.pinterest.com/pin/636907572345689110/feedback/",
+        Platform.PINTEREST,
+        "https://www.pinterest.com/pin/636907572345689110/",
+    ),
     (
         "https://www.pinterest.com/someuser/my-board/",
         Platform.PINTEREST,

@@ -71,31 +71,42 @@ def ladder_for(quality: Quality) -> list[Quality]:
     return [quality, *LADDER]
 
 
+def ytdlp_common_opts(settings: Settings, cookies: str | None) -> dict:
+    """Options shared by downloads and probes: network, cookies, PO-token provider."""
+    opts: dict = {
+        "noplaylist": True,
+        "playlist_items": "1",
+        "socket_timeout": settings.extract_timeout,
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+    }
+    if cookies:
+        opts["cookiefile"] = cookies
+    if settings.download_proxy:
+        opts["proxy"] = settings.download_proxy
+    if settings.pot_provider_url:
+        opts["extractor_args"] = {
+            "youtubepot-bgutilhttp": {"base_url": [settings.pot_provider_url.rstrip("/")]}
+        }
+    return opts
+
+
 def _ytdlp_once(
     url: str, dest: Path, quality: Quality, settings: Settings, cookies: str | None
 ) -> list[Path]:
     import yt_dlp  # imported lazily: heavy, and tests don't need it
 
-    opts: dict = {
+    opts: dict = ytdlp_common_opts(settings, cookies) | {
         "format": ytdlp_format(quality),
         "outtmpl": str(dest / "%(id)s.%(ext)s"),
-        "noplaylist": True,
         "max_filesize": settings.max_file_bytes,
         "merge_output_format": "mp4" if quality != Quality.AUDIO else None,
-        "socket_timeout": settings.extract_timeout,
         "retries": 2,
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": True,
         "restrictfilenames": True,
-        "playlist_items": "1",
     }
     if settings.rate_limit:
         opts["ratelimit"] = yt_dlp.utils.parse_bytes(settings.rate_limit)
-    if cookies:
-        opts["cookiefile"] = cookies
-    if settings.download_proxy:
-        opts["proxy"] = settings.download_proxy
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
@@ -183,18 +194,7 @@ def formats_from_info(info: dict) -> list[FormatOption]:
 def _ytdlp_probe_sync(url: str, settings: Settings, cookies: str | None) -> tuple[list, str | None]:
     import yt_dlp
 
-    opts: dict = {
-        "noplaylist": True,
-        "skip_download": True,
-        "socket_timeout": settings.extract_timeout,
-        "quiet": True,
-        "no_warnings": True,
-        "playlist_items": "1",
-    }
-    if cookies:
-        opts["cookiefile"] = cookies
-    if settings.download_proxy:
-        opts["proxy"] = settings.download_proxy
+    opts = ytdlp_common_opts(settings, cookies) | {"skip_download": True}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)

@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     # yt-dlp / gallery-dl / short-link resolution. Both optional and independent.
     telegram_proxy: str | None = Field(default=None, alias="TELEGRAM_PROXY")
     download_proxy: str | None = Field(default=None, alias="DOWNLOAD_PROXY")
+    # bgutil PO-token sidecar for YouTube; empty disables the plugin's remote mode.
+    pot_provider_url: str | None = Field(default=None, alias="POT_PROVIDER_URL")
 
     # Gateway
     mode: Literal["polling", "webhook"] = Field(default="polling", alias="MODE")
@@ -63,6 +65,7 @@ class Settings(BaseSettings):
         "telegram_api_url",
         "telegram_proxy",
         "download_proxy",
+        "pot_provider_url",
         "rate_limit",
         "yt_cookies_file",
         "ig_cookies_file",
@@ -78,7 +81,9 @@ class Settings(BaseSettings):
             return v or None
         return v
 
-    @field_validator("telegram_api_url", "telegram_proxy", "download_proxy", "webhook_url")
+    @field_validator(
+        "telegram_api_url", "telegram_proxy", "download_proxy", "pot_provider_url", "webhook_url"
+    )
     @classmethod
     def _must_be_url(cls, v: str | None) -> str | None:
         if v and not v.startswith(("http://", "https://", "socks5://", "socks4://")):

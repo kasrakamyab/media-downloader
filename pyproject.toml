@@ -10,7 +10,11 @@ dependencies = [
     "pydantic-settings>=2.3",
     "structlog>=24.1",
     "redis>=5.0",
-    "yt-dlp>=2024.8",
+    # [default] pulls in yt-dlp-ejs, the YouTube challenge-solver scripts (needs deno).
+    "yt-dlp[default]>=2025.11",
+    # yt-dlp plugin: fetches YouTube PO tokens from the bgutil sidecar (docker-compose.yml),
+    # which is what clears "Sign in to confirm you're not a bot" without an account.
+    "bgutil-ytdlp-pot-provider>=2.0",
     "gallery-dl>=1.27",
     "aiohttp-socks>=0.9",  # socks5:// support for TELEGRAM_PROXY
 ]
