@@ -69,7 +69,13 @@ class Sender(Protocol):
 
 
 class DeliveryError(Exception):
-    """The file was produced but could not be handed to Telegram (slow link, network)."""
+    """The file was produced but could not be handed to Telegram (slow link, network).
+
+    Never retry an upload automatically after this: `request_timeout` also covers waiting
+    for Telegram's reply, so a body that finished uploading can still be delivered by the
+    server after the client gave up, and a retry would post the same file twice. There is
+    no Bot API call to check whether the first one landed.
+    """
 
 
 def upload_timeout_for(

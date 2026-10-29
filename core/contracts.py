@@ -54,7 +54,8 @@ ERROR_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.TOO_LARGE: "That file is too large for me to send over Telegram.",
     ErrorCode.UPLOAD_FAILED: (
         "I downloaded it, but the upload to Telegram timed out (slow connection). "
-        "Try again, or pick a lower quality."
+        "It may still show up in the next minute or two; if not, try again or pick a "
+        "lower quality."
     ),
     ErrorCode.RATE_LIMITED: "The source is rate-limiting us right now. Try again in a few minutes.",
     ErrorCode.SOURCE_DOWN: "The source didn't respond. Try again in a few minutes.",
