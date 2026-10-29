@@ -67,6 +67,9 @@ async def test_heartbeat_and_stats(redis) -> None:
     await beat(redis, Platform.YOUTUBE, 60)
     assert await is_alive(redis, Platform.YOUTUBE)
     await record_result(redis, Platform.YOUTUBE, Result.ok("a", ["x"], 1, cached=True))
-    await record_result(redis, Platform.YOUTUBE, Result.error("b", "TOO_LARGE", 1))
+    await record_result(redis, Platform.YOUTUBE, Result.error("b", "TOO_LARGE", 1), "group")
     s = await stats(redis, Platform.YOUTUBE)
     assert s == {"ok": 1, "cache_hit": 1, "error": 1, "error:TOO_LARGE": 1}
+    assert await stats(redis, Platform.YOUTUBE, "private") == {"ok": 1, "cache_hit": 1}
+    assert await stats(redis, Platform.YOUTUBE, "group") == {"error": 1, "error:TOO_LARGE": 1}
+    assert await stats(redis, Platform.INSTAGRAM, "group") == {}

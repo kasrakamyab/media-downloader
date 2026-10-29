@@ -67,4 +67,23 @@ shows the count.
 | G1 | Join/leave tracking, migration, `/dl` / reply / mention triggers, in-context replies, media-rights errors | done |
 | G2 | `/settings` for group admins: auto-download on/off, max quality, allowed platforms; auto mode needs privacy off or admin and skips the quality menu | done |
 | G3 | Per-group hourly limits, per-chat concurrency cap so one busy group can't starve others, quiet failures in auto mode | done |
-| G4 | `/stats` split private vs group, group count in alerts, docs polish | |
+| G4 | `/stats` split private vs group, group counts, docs | done |
+
+## Live checklist (one pass over G1–G4)
+
+1. BotFather: `/setjoingroups` → Enable. Keep `/setprivacy` enabled for now.
+2. Add the bot to a test group → greeting; `redis-cli keys 'group:*'` shows `group:<id>`.
+3. `/dl <youtube link>` → quality menu as a reply to your message → video replied to it.
+   Another member taps the menu → "Only the person who asked can choose".
+4. Post a link, reply to it with `/dl` → video replies to the *original* message.
+5. `/settings` as a non-admin → refused. As admin: set *Max quality* to 480p →
+   `/dl <youtube link>` shows no rung above 480p. Turn YouTube off → `/dl <youtube link>`
+   says it is turned off; Instagram still works.
+6. Auto-download: promote the bot to admin (or BotFather `/setprivacy` → Disable and re-add
+   the bot), turn *Auto-download* on → post a link with no command → media arrives as a
+   reply with no "working" message; post a TikTok link → nothing at all.
+7. Limits: with `MAX_ACTIVE_PER_CHAT=1` in `.env`, two members `/dl` long videos back to
+   back → the second gets "This group already has 1 downloads running"; a private chat
+   `/dl` at the same time still goes through.
+8. Revoke the bot's *send media* right → `/dl` yields "I'm not allowed to send media".
+9. `/stats` (admin, private chat) shows the group lines; remove the bot → entry gone.

@@ -19,18 +19,27 @@ async def is_alive(redis: Redis, platform: Platform) -> bool:
     return bool(await redis.exists(heartbeat_key(platform)))
 
 
-async def record_result(redis: Redis, platform: Platform, result: Result) -> None:
-    """Keep the last result per job (1 h) and roll up counters for /stats."""
+def stats_key(platform: Platform, scope: str | None = None) -> str:
+    """`stats:<platform>` holds the totals; `stats:<platform>:group` / `:private` the split."""
+    return f"stats:{platform}" if scope is None else f"stats:{platform}:{scope}"
+
+
+async def record_result(
+    redis: Redis, platform: Platform, result: Result, scope: str = "private"
+) -> None:
+    """Keep the last result per job (1 h) and roll up counters for /stats, both in total
+    and per scope ("private" or "group")."""
     pipe = redis.pipeline()
     pipe.set(f"result:{result.job_id}", result.model_dump_json(), ex=3600)
-    pipe.hincrby(f"stats:{platform}", result.status, 1)
-    if result.cached:
-        pipe.hincrby(f"stats:{platform}", "cache_hit", 1)
-    if result.error_code:
-        pipe.hincrby(f"stats:{platform}", f"error:{result.error_code}", 1)
+    for key in (stats_key(platform), stats_key(platform, scope)):
+        pipe.hincrby(key, result.status, 1)
+        if result.cached:
+            pipe.hincrby(key, "cache_hit", 1)
+        if result.error_code:
+            pipe.hincrby(key, f"error:{result.error_code}", 1)
     await pipe.execute()
 
 
-async def stats(redis: Redis, platform: Platform) -> dict[str, int]:
-    raw = await redis.hgetall(f"stats:{platform}")
+async def stats(redis: Redis, platform: Platform, scope: str | None = None) -> dict[str, int]:
+    raw = await redis.hgetall(stats_key(platform, scope))
     return {(k.decode() if isinstance(k, bytes) else k): int(v) for k, v in raw.items()}

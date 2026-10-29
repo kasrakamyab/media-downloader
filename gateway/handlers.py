@@ -209,8 +209,10 @@ async def on_stats(
     if not message.from_user or message.from_user.id not in settings.admin_id_set:
         return
     lines = []
+    total: dict[str, int] = {"ok": 0, "error": 0}
     for platform in Platform:
         s = await stats(arq, platform)
+        g = await stats(arq, platform, "group")
         alive = await is_alive(arq, platform)
         open_ = await breaker.is_open(platform)
         depth = await arq.zcard(QUEUE_NAMES[platform])
@@ -226,10 +228,17 @@ async def on_stats(
             state = "🔴 no heartbeat"
         lines.append(
             f"<b>{PLATFORM_LABEL[platform]}</b> — {state}\n"
-            f"   queue={depth} ok={ok} err={err} cache hits={rate}"
+            f"   queue={depth} ok={ok} err={err} cache hits={rate}\n"
+            f"   in groups: ok={g.get('ok', 0)} err={g.get('error', 0)}"
         )
+        total["ok"] += ok
+        total["error"] += err
     if groups is not None:
-        lines.append(f"<b>Groups</b>: {await groups.count()}")
+        lines.append(
+            f"<b>Groups</b>: {await groups.count()} joined, "
+            f"{await groups.auto_count()} with auto-download"
+        )
+    lines.append(f"<b>Total</b>: ok={total['ok']} err={total['error']}")
     await message.answer("\n".join(lines))
 
 
