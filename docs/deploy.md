@@ -97,9 +97,18 @@ proxy listening on the host. The gateway and workers use it for every Bot API ca
 an inline `# comment` becomes part of the value. Keep comments on their own lines. Settings
 strip the common cases, but the fix is the file.
 
+**YouTube: "Sign in to confirm you're not a bot".** YouTube asks this of data-center and
+VPN IPs. The fix that needs no account is the `pot-provider` sidecar in `docker-compose.yml`
+(bgutil): it mints proof-of-origin tokens and the yt-dlp plugin attaches them. Check it is
+running (`docker compose ps pot-provider`) and that the worker log doesn't say the plugin
+couldn't reach it. If the sidecar is up and YouTube still insists, add `YT_COOKIES_FILE`
+from a throwaway Google account (below). The image ships `deno`, which yt-dlp needs for
+YouTube's JavaScript challenges; a "No supported JavaScript runtime" warning means an old
+image — rebuild.
+
 **"That platform wants a login" (`LOGIN_REQUIRED`).** Instagram refuses almost everything
-without a session; YouTube does it from data-center IPs ("Sign in to confirm you're not a
-bot"). The admin gets a 🔑 alert with the exact message. Fix: export cookies from a browser
+without a session (the worker then tries yt-dlp, which gets public reels but not photo
+posts or carousels). The admin gets a 🔑 alert with the exact message. Fix: export cookies from a browser
 where a throwaway account is logged in (any "Get cookies.txt" extension, Netscape format),
 put the file in `./secrets/` and set `IG_COOKIES_FILE=/secrets/instagram.txt` (or
 `YT_COOKIES_FILE`). Use an account you don't care about; export from a private window and

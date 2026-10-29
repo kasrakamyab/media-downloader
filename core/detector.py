@@ -53,7 +53,7 @@ _INSTAGRAM_PATH = re.compile(r"^/(?:[A-Za-z0-9_.]+/)?(p|reel|reels|tv)/[A-Za-z0-
 _PINTEREST_HOST = re.compile(
     r"^(?:[a-z]{2,3}\.|www\.)?pinterest\.(?:com|[a-z]{2,3}|co\.[a-z]{2}|com\.[a-z]{2})$"
 )
-_PINTEREST_PATH = re.compile(r"^/pin/\d+/?$|^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$")
+_PINTEREST_PATH = re.compile(r"^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$")  # user/board
 _PINTEREST_NOT_BOARD = {"pin", "search", "ideas", "today", "settings", "login", "videos"}
 
 _URL_IN_TEXT = re.compile(r"(?:https?://|www\.)[^\s<>\"']+", re.IGNORECASE)
@@ -131,13 +131,14 @@ def detect(raw: str) -> Detected:
             return Detected(Platform.PINTEREST, f"https://pin.it/{code}")
         raise UnsupportedURL(raw)
     if _PINTEREST_HOST.match(host):
+        # pin.it resolves to shapes like /pin/<id>/sent/?invite_code=…: keep only the id.
+        m = re.match(r"^/pin/(\d+)(?:/|$)", path)
+        if m:
+            return Detected(Platform.PINTEREST, f"https://www.pinterest.com/pin/{m.group(1)}/")
         if not _PINTEREST_PATH.match(path):
             raise UnsupportedURL(raw)
         first = path.strip("/").split("/")[0]
-        if first == "pin":
-            if not re.match(r"^/pin/\d+/?$", path):
-                raise UnsupportedURL(raw)
-        elif first in _PINTEREST_NOT_BOARD:
+        if first in _PINTEREST_NOT_BOARD:
             raise UnsupportedURL(raw)
         norm = "https://www.pinterest.com" + path.rstrip("/") + "/"
         return Detected(Platform.PINTEREST, norm)

@@ -48,14 +48,33 @@ services:
       start_period: 20s
     mem_limit: 256m
 
+  # Generates YouTube proof-of-origin tokens for yt-dlp (bgutil plugin). This is what gets
+  # past "Sign in to confirm you're not a bot" without any Google account or cookies.
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.2-deno
+    restart: unless-stopped
+    environment:
+      # The provider fetches from YouTube itself, so it needs the same proxy as the worker.
+      HTTPS_PROXY: ${DOWNLOAD_PROXY:-}
+      HTTP_PROXY: ${DOWNLOAD_PROXY:-}
+    expose:
+      - "4416"
+    mem_limit: 256m
+
   worker-youtube:
     <<: *service
     command: ["arq", "workers.youtube.worker.WorkerSettings"]
     environment:
       REDIS_URL: redis://redis:6379/0
-      NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api
-      no_proxy: localhost,127.0.0.1,redis,telegram-bot-api
+      NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api,pot-provider
+      no_proxy: localhost,127.0.0.1,redis,telegram-bot-api,pot-provider
       WORKER_CONCURRENCY: ${YT_CONCURRENCY:-3}
+      POT_PROVIDER_URL: ${POT_PROVIDER_URL:-http://pot-provider:4416}
+    depends_on:
+      redis:
+        condition: service_healthy
+      pot-provider:
+        condition: service_started
     volumes:
       - ./secrets:/secrets:ro
     healthcheck: *worker-health
@@ -94,8 +113,10 @@ services:
     image: aiogram/telegram-bot-api:latest
     profiles: ["bigfiles"]
     environment:
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID:?set TELEGRAM_API_ID in .env}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:?set TELEGRAM_API_HASH in .env}
+      # Compose interpolates these even when the profile is off, so no `:?` here; the
+      # image itself refuses to start without them.
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
       TELEGRAM_LOCAL: "1"
     volumes:
       - bot-api-data:/var/lib/telegram-bot-api
