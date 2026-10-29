@@ -7,12 +7,50 @@ Both run off the event loop (thread / subprocess) and translate tool failures in
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from core.contracts import ErrorCode, FormatOption, Quality
 from core.settings import Settings
 from core.worker import ExtractError, collect_files
+
+
+@contextmanager
+def cookie_copy(cookies: str | None, workdir: Path) -> Iterator[str | None]:
+    """Yield a private, writable copy of a cookies file (or None when there is none).
+
+    yt-dlp and gallery-dl both write refreshed cookies back to the file they were given on
+    exit. `./secrets` is mounted read-only on purpose, so hand them a per-call copy inside
+    the job folder and let the original stay untouched.
+    """
+    if not cookies:
+        yield None
+        return
+    src = Path(cookies)
+    if not src.is_file():
+        raise ExtractError(ErrorCode.UNKNOWN, f"cookies file missing: {cookies}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="cookies-", suffix=".txt", dir=workdir)
+    os.close(fd)
+    try:
+        shutil.copyfile(src, tmp)
+        os.chmod(tmp, 0o600)
+        yield tmp
+    finally:
+        with_suppress_unlink(tmp)
+
+
+def with_suppress_unlink(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
 
 _LOGIN_RE = re.compile(
     r"login|log in|sign in|logged[- ]in|cookies|authentication|requires? (?:an? )?account",
@@ -81,8 +119,8 @@ def ytdlp_common_opts(settings: Settings, cookies: str | None) -> dict:
         "no_warnings": True,
         "noprogress": True,
     }
-    if cookies:
-        opts["cookiefile"] = cookies
+    # `cookies` is resolved to a writable copy by the callers (see cookie_copy); the
+    # original path is never handed to yt-dlp.
     if settings.download_proxy:
         opts["proxy"] = settings.download_proxy
     if settings.pot_provider_url:
@@ -108,10 +146,17 @@ def _ytdlp_once(
     if settings.rate_limit:
         opts["ratelimit"] = yt_dlp.utils.parse_bytes(settings.rate_limit)
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+        with cookie_copy(cookies, dest) as jar:
+            if jar:
+                opts["cookiefile"] = jar
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
     except yt_dlp.utils.DownloadError as e:
         raise ExtractError(classify(str(e)), str(e)) from e
+    except OSError as e:
+        # Disk full, permissions, a mount gone read-only: a configuration problem, not
+        # something a retry on the next rung would change.
+        raise ExtractError(ErrorCode.UNKNOWN, f"filesystem error: {e}") from e
     return collect_files(dest)
 
 
@@ -196,10 +241,15 @@ def _ytdlp_probe_sync(url: str, settings: Settings, cookies: str | None) -> tupl
 
     opts = ytdlp_common_opts(settings, cookies) | {"skip_download": True}
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        with cookie_copy(cookies, Path(settings.job_dir)) as jar:
+            if jar:
+                opts["cookiefile"] = jar
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:
         raise ExtractError(classify(str(e)), str(e)) from e
+    except OSError as e:
+        raise ExtractError(ErrorCode.UNKNOWN, f"filesystem error: {e}") from e
     if info and info.get("_type") == "playlist":
         entries = info.get("entries") or []
         info = entries[0] if entries else {}
@@ -253,20 +303,22 @@ async def gallerydl_download(
     ]
     if settings.rate_limit:
         cmd += ["--limit-rate", settings.rate_limit]
-    if cookies:
-        cmd += ["--cookies", cookies]
     if settings.download_proxy:
         cmd += ["--proxy", settings.download_proxy]
-    cmd.append(url)
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        _, err = await asyncio.wait_for(proc.communicate(), timeout=settings.download_timeout)
-    except TimeoutError:
-        proc.kill()
-        raise ExtractError(ErrorCode.SOURCE_DOWN, "gallery-dl timeout") from None
+    # gallery-dl writes refreshed cookies back too (cookies-update), so it gets a copy.
+    with cookie_copy(cookies, dest) as jar:
+        if jar:
+            cmd += ["--cookies", jar]
+        cmd.append(url)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=settings.download_timeout)
+        except TimeoutError:
+            proc.kill()
+            raise ExtractError(ErrorCode.SOURCE_DOWN, "gallery-dl timeout") from None
     stderr = err.decode(errors="replace")
     files = collect_files(dest)
     if proc.returncode == 0 and files:
