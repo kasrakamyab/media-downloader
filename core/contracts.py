@@ -97,7 +97,8 @@ class Job(BaseModel):
     job_id: str = Field(default_factory=new_job_id)
     chat_id: int
     user_id: int
-    message_id: int  # the "Working on it…" placeholder the worker edits when done
+    message_id: int  # the "Working on it…" placeholder the worker edits when done; 0 = none
+    quiet: bool = False  # auto mode in groups: no placeholder, failures are only logged
     url: str  # normalised URL from the detector
     platform: Platform
     quality: Quality = Quality.BEST

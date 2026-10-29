@@ -1,20 +1,102 @@
-"""Groups the bot is a member of, kept in Redis.
+"""Groups the bot is a member of, and their settings, kept in Redis.
 
 `my_chat_member` updates add and remove entries; a group -> supergroup migration moves the
-entry (and any per-group settings, which later steps add under `group:<id>:*`) to the new id.
+entry and the settings (`group:<id>:settings`) to the new id.
 """
 
 from __future__ import annotations
 
 import time
 
+from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
+from core.contracts import Platform, Quality
+
 GROUPS_SET = "groups"
+
+# Rungs from lowest to highest; BEST is "no cap".
+QUALITY_RANK: dict[Quality, int] = {
+    Quality.AUDIO: 0,
+    Quality.P360: 1,
+    Quality.P480: 2,
+    Quality.P720: 3,
+    Quality.P1080: 4,
+    Quality.BEST: 5,
+}
+# What /settings cycles through.
+MAX_QUALITY_CYCLE: list[Quality] = [
+    Quality.BEST,
+    Quality.P1080,
+    Quality.P720,
+    Quality.P480,
+    Quality.P360,
+    Quality.AUDIO,
+]
+
+
+def cap_quality(wanted: Quality, cap: Quality) -> Quality:
+    """The higher of the two limits wins: a 720p request in a 480p group becomes 480p."""
+    if cap == Quality.BEST:
+        return wanted
+    if wanted == Quality.BEST:
+        return cap
+    return wanted if QUALITY_RANK[wanted] <= QUALITY_RANK[cap] else cap
+
+
+def within_cap(quality: Quality, cap: Quality) -> bool:
+    return cap == Quality.BEST or QUALITY_RANK[quality] <= QUALITY_RANK[cap]
+
+
+class GroupSettings(BaseModel):
+    """Per-group knobs, changed by group admins through /settings."""
+
+    auto: bool = False  # download every supported link without /dl (needs privacy off)
+    max_quality: Quality = Quality.BEST
+    platforms: list[Platform] = Field(default_factory=lambda: list(Platform))
+
+    def allows(self, platform: Platform) -> bool:
+        return platform in self.platforms
+
+    def to_hash(self) -> dict[str, str]:
+        return {
+            "auto": "1" if self.auto else "0",
+            "max_quality": self.max_quality.value,
+            "platforms": ",".join(p.value for p in self.platforms),
+        }
+
+    @classmethod
+    def from_hash(cls, raw: dict[str, str]) -> GroupSettings:
+        data: dict = {}
+        if "auto" in raw:
+            data["auto"] = raw["auto"] == "1"
+        if raw.get("max_quality"):
+            try:
+                data["max_quality"] = Quality(raw["max_quality"])
+            except ValueError:
+                pass
+        if "platforms" in raw:
+            data["platforms"] = [
+                Platform(p)
+                for p in raw["platforms"].split(",")
+                if p in Platform.__members__.values()
+            ]
+        return cls(**data)
 
 
 def group_key(chat_id: int) -> str:
     return f"group:{chat_id}"
+
+
+def settings_key(chat_id: int) -> str:
+    return f"group:{chat_id}:settings"
+
+
+def _decode(raw: dict) -> dict[str, str]:
+    return {
+        (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
+        for k, v in raw.items()
+    }
 
 
 class GroupRegistry:
@@ -69,15 +151,26 @@ class GroupRegistry:
 
     async def get(self, chat_id: int) -> dict[str, str] | None:
         raw = await self._redis.hgetall(group_key(chat_id))
-        if not raw:
-            return None
-        return {
-            (k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v)
-            for k, v in raw.items()
-        }
+        return _decode(raw) if raw else None
 
     async def is_member(self, chat_id: int) -> bool:
         return bool(await self._redis.sismember(GROUPS_SET, chat_id))
 
     async def count(self) -> int:
         return int(await self._redis.scard(GROUPS_SET))
+
+    # ---- settings ------------------------------------------------------------------
+
+    async def get_settings(self, chat_id: int) -> GroupSettings:
+        raw = await self._redis.hgetall(settings_key(chat_id))
+        return GroupSettings.from_hash(_decode(raw)) if raw else GroupSettings()
+
+    async def save_settings(self, chat_id: int, settings: GroupSettings) -> None:
+        await self._redis.hset(settings_key(chat_id), mapping=settings.to_hash())
+
+    async def auto_count(self) -> int:
+        n = 0
+        async for k in self._redis.scan_iter(match="group:*:settings"):
+            if await self._redis.hget(k, "auto") in (b"1", "1"):
+                n += 1
+        return n

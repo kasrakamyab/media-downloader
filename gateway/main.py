@@ -26,6 +26,7 @@ from core.settings import Settings, get_settings
 from core.telegram import make_bot
 from gateway.alerts import alert_loop
 from gateway.handlers import router
+from gateway.settings_handlers import settings_router
 
 log = get_logger("gateway")
 
@@ -45,6 +46,7 @@ async def build() -> tuple[Dispatcher, Settings, Bot]:
         arq, settings.breaker_threshold, settings.breaker_window, settings.breaker_open_for
     )
     dp = Dispatcher()
+    dp.include_router(settings_router)  # before the catch-all text handler in `router`
     dp.include_router(router)
     dp["settings"] = settings
     dp["arq"] = arq

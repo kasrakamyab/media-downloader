@@ -40,7 +40,7 @@ from core.contracts import (
     Quality,
 )
 from core.detector import UnsupportedURL, detect, find_urls
-from core.groups import GroupRegistry
+from core.groups import GroupRegistry, GroupSettings, cap_quality, within_cap
 from core.health import is_alive, stats
 from core.limits import UserLimits
 from core.logging import get_logger
@@ -93,10 +93,13 @@ class PendingChoice(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class Ask:
-    """A message that asks us for a download: the text to search and the message to reply to."""
+    """A message that asks us for a download: the text to search and the message to reply to.
+    `explicit` is False in auto mode, where nobody asked and the bot must stay quiet on
+    anything but success."""
 
     text: str
     source: Message
+    explicit: bool = True
 
 
 def pending_key(job_id: str) -> str:
@@ -120,10 +123,11 @@ def message_text(message: Message) -> str:
     return text
 
 
-def extract_ask(message: Message, bot_username: str) -> Ask | None:
+def extract_ask(message: Message, bot_username: str, auto: bool = False) -> Ask | None:
     """Decide whether a message asks for a download.
 
-    Private chat: anything with a link. Group: only `/dl`, a reply with `/dl`, or a mention.
+    Private chat: anything with a link. Group: only `/dl`, a reply with `/dl`, or a mention —
+    plus, with the group's auto-download on, any message that carries a link (quietly).
     Returns None when the bot should stay silent.
     """
     text = message_text(message)
@@ -133,6 +137,8 @@ def extract_ask(message: Message, bot_username: str) -> Ask | None:
     is_command = lowered.startswith("/dl")
     mentioned = bool(bot_username) and f"@{bot_username.lower()}" in lowered
     if not (is_command or mentioned):
+        if auto and find_urls(text):
+            return Ask(text, message, explicit=False)
         return None
     if find_urls(text):
         return Ask(text, message)
@@ -272,70 +278,84 @@ async def on_text(
     cache: FileCache,
     breaker: Breaker,
     bot_username: str = "",
+    groups: GroupRegistry | None = None,
 ) -> None:
     if not message.from_user:
         return
-    ask = extract_ask(message, bot_username)
+    group = is_group(message)
+    gs = await groups.get_settings(message.chat.id) if (group and groups) else GroupSettings()
+    ask = extract_ask(message, bot_username, auto=gs.auto)
     if ask is None:
         return  # a group message that isn't for us
+
+    async def tell(text: str) -> None:
+        """User-facing refusals: spoken when asked, swallowed in auto mode."""
+        if ask.explicit:
+            await say(message, text)
+
     urls = find_urls(ask.text)
     if not urls:
-        await say(
-            message,
+        await tell(
             "Send me a link to a YouTube video, Instagram post or Pinterest pin."
-            if not is_group(message)
-            else "Give me a link: <code>/dl &lt;link&gt;</code>, or reply to one with /dl.",
+            if not group
+            else "Give me a link: <code>/dl &lt;link&gt;</code>, or reply to one with /dl."
         )
         return
 
     try:
         found = detect(urls[0])
     except UnsupportedURL:
-        await say(
-            message, "I can't handle that link yet. I support YouTube, Instagram and Pinterest."
+        await tell("I can't handle that link yet. I support YouTube, Instagram and Pinterest.")
+        return
+
+    if group and not gs.allows(found.platform):
+        await tell(
+            f"{PLATFORM_LABEL[found.platform]} links are turned off in this group "
+            "(admins: /settings)."
         )
         return
 
     quality = Quality.BEST
     if found.platform == Platform.YOUTUBE and "audio" in ask.text.lower().split():
         quality = Quality.AUDIO
+    quality = cap_quality(quality, gs.max_quality)
 
     if await cache.is_blocked(found.url):
-        await say(message, "That link has been blocked on this bot.")
+        await tell("That link has been blocked on this bot.")
         return
 
     if not await platform_available(arq, breaker, found.platform):
         others = [
             p for p in Platform if p != found.platform and await platform_available(arq, breaker, p)
         ]
-        await say(message, unavailable_text(found.platform, others))
+        await tell(unavailable_text(found.platform, others))
         return
 
     reason = await limits.try_acquire(message.from_user.id)
     if reason == "hourly":
-        await say(
-            message,
+        await tell(
             f"You've hit the limit of {settings.hourly_limit} requests per hour. "
-            "Try again a bit later.",
+            "Try again a bit later."
         )
         return
     if reason == "active":
-        await say(
-            message,
+        await tell(
             f"You already have {settings.max_active_jobs} downloads running. "
-            "Wait for them to finish first.",
+            "Wait for them to finish first."
         )
         return
 
-    placeholder = await say(ask.source, WORKING, reply=True)  # always attached to the link
-    if placeholder is None:  # can't even post text here: nothing more we can do
-        await limits.release(message.from_user.id)
-        return
-    group = is_group(message)
+    placeholder = None
+    if ask.explicit:  # auto mode posts nothing until the media itself
+        placeholder = await say(ask.source, WORKING, reply=True)  # attached to the link
+        if placeholder is None:  # can't even post text here: nothing more we can do
+            await limits.release(message.from_user.id)
+            return
     job = Job(
         chat_id=message.chat.id,
         user_id=message.from_user.id,
-        message_id=placeholder.message_id,
+        message_id=placeholder.message_id if placeholder else 0,
+        quiet=not ask.explicit,
         url=found.url,
         platform=found.platform,
         quality=quality,
@@ -344,13 +364,19 @@ async def on_text(
         thread_id=message.message_thread_id if (group and message.is_topic_message) else None,
     )
 
-    # A cached answer for the default quality skips the menu: the worker serves it instantly.
+    # The menu is for people who asked. A cached answer for the default quality skips it
+    # too: the worker serves that instantly.
     if (
-        found.platform in PROBE_PLATFORMS
-        and quality == Quality.BEST
-        and not await cache.get(found.url, Quality.BEST)
+        placeholder is not None
+        and found.platform in PROBE_PLATFORMS
+        and quality in (Quality.BEST, gs.max_quality)
+        and not await cache.get(found.url, quality)
     ):
-        offered = await _quality_menu(arq, found.url, settings)
+        offered = [
+            f
+            for f in await _quality_menu(arq, found.url, settings)
+            if within_cap(f.quality, gs.max_quality)
+        ]
         if len(offered) >= 2:
             await _offer_choice(arq, placeholder, job, offered, settings)
             return
@@ -473,7 +499,11 @@ async def _enqueue_pending(arq: ArqRedis, job: Job, settings: Settings) -> None:
 
 
 async def _enqueue(
-    arq: ArqRedis, limits: UserLimits, job: Job, settings: Settings, placeholder: Message
+    arq: ArqRedis,
+    limits: UserLimits,
+    job: Job,
+    settings: Settings,
+    placeholder: Message | None,
 ) -> None:
     try:
         await arq.enqueue_job(
@@ -486,8 +516,11 @@ async def _enqueue(
     except Exception:
         log.exception("enqueue_failed", job_id=job.job_id)
         await limits.release(job.user_id)
-        with contextlib.suppress(TelegramBadRequest, TelegramForbiddenError):
-            await placeholder.edit_text("❌ Couldn't queue that right now. Try again in a minute.")
+        if placeholder is not None:
+            with contextlib.suppress(TelegramBadRequest, TelegramForbiddenError):
+                await placeholder.edit_text(
+                    "❌ Couldn't queue that right now. Try again in a minute."
+                )
         return
     log.info(
         "job_enqueued",

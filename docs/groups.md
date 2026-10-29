@@ -30,6 +30,18 @@ be used by the person who asked; everyone else gets "Only the person who asked c
 
 Per-user limits (2 at a time, 20/hour) apply inside groups exactly as in private chats.
 
+## Per-group settings (`/settings`, admins only)
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Auto-download | off | When on, every supported link posted in the group is fetched without `/dl`: no "working" message, no quality menu (the max quality is used), and failures are only logged, never posted. Telegram only delivers plain messages to the bot when it is an **admin** or privacy mode is **off** — turn auto on without one of those and nothing happens. |
+| Max quality | best | Caps YouTube: `/dl` menus only show rungs up to the cap, auto mode downloads at the cap. `audio` always allowed. |
+| Platforms | all | Links from a disabled platform are refused with a short reply (`/dl`) or ignored (auto). |
+
+Taps on the keyboard are re-checked against the group's admin list and the chat the keyboard
+belongs to, so forwarding a settings message elsewhere does nothing. Anonymous admins
+(posting as the group) count as admins.
+
 ## What the bot stores
 
 `group:<chat_id>` in Redis: title, type, who added it, when. Added on join, removed when the
@@ -41,6 +53,6 @@ shows the count.
 | Step | What | State |
 | --- | --- | --- |
 | G1 | Join/leave tracking, migration, `/dl` / reply / mention triggers, in-context replies, media-rights errors | done |
-| G2 | `/settings` for group admins: auto-download on/off, max quality, allowed platforms; auto mode needs privacy off or admin and skips the quality menu | next |
+| G2 | `/settings` for group admins: auto-download on/off, max quality, allowed platforms; auto mode needs privacy off or admin and skips the quality menu | done |
 | G3 | Per-group hourly limits, per-chat concurrency cap so one busy group can't starve others, quiet failures in auto mode | |
 | G4 | `/stats` split private vs group, group count in alerts, docs polish | |

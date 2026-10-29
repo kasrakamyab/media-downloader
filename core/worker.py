@@ -119,7 +119,7 @@ async def run_job(
                 )
             except ForbiddenError as e:
                 raise ExtractError(ErrorCode.FORBIDDEN, str(e)) from e
-            await sender.finish(job.chat_id, job.message_id, None)
+            await _finish_ok(sender, job)
             result = Result.ok(job.job_id, cached, _ms(started), cached=True)
             log_.info("served_from_cache", took_ms=result.took_ms)
             return result
@@ -149,7 +149,7 @@ async def run_job(
         except DeliveryError as e:
             raise ExtractError(ErrorCode.UPLOAD_FAILED, str(e)) from e
         await cache.set(job.url, job.quality, file_ids)
-        await sender.finish(job.chat_id, job.message_id, None)
+        await _finish_ok(sender, job)
         result = Result.ok(job.job_id, file_ids, _ms(started))
         log_.info("job_done", files=len(files), took_ms=result.took_ms)
         return result
@@ -232,7 +232,16 @@ async def run_probe(url: str, *, prober: Prober, settings: Settings) -> ProbeRes
     return ProbeResult(url=url, formats=formats, title=title, took_ms=_ms(started))
 
 
+async def _finish_ok(sender: Sender, job: Job) -> None:
+    if job.message_id:  # 0 = no placeholder (auto mode in groups)
+        await sender.finish(job.chat_id, job.message_id, None)
+
+
 async def _safe_finish(sender: Sender, job: Job, text: str) -> None:
+    """Tell the user why it failed — unless the job is quiet (auto mode), where a failure
+    is only logged so the bot never adds noise to a group it wasn't asked in."""
+    if job.quiet or not job.message_id:
+        return
     try:
         await sender.finish(job.chat_id, job.message_id, f"❌ {text}")
     except Exception:
