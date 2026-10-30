@@ -165,12 +165,15 @@ def ytdlp_format(quality: Quality) -> str:
 
 def ytdlp_sort(quality: Quality) -> list[str]:
     """`format_sort` for a rung: `res:<h>` prefers the best format whose *shorter* side is
-    at most h (so a 720x1280 portrait counts as 720p, not 1280p), then mp4/m4a, then
-    bitrate. Formats above the rung are still considered last, never excluded."""
+    at most h (so a 720x1280 portrait counts as 720p, not 1280p); then plain https over
+    HLS/DASH segments — an HLS stream reports only filesize_approx and yt-dlp can't enforce
+    max_filesize on it, so a muxed m3u8 with a fat bitrate would win and blow the cap; then
+    mp4/m4a, then bitrate. Formats above the rung (or HLS-only sources such as Pinterest)
+    are still considered, just later."""
     if quality == Quality.AUDIO:
-        return ["abr", "ext:m4a"]
+        return ["abr", "proto", "ext:m4a"]
     h = _HEIGHT.get(quality, 720)
-    return [f"res:{h}", "ext:mp4:m4a", "tbr"]
+    return [f"res:{h}", "proto", "ext:mp4:m4a", "tbr"]
 
 
 def ladder_for(quality: Quality) -> list[Quality]:
@@ -272,6 +275,15 @@ async def ytdlp_download(
             continue
         if files:
             size = sum(f.stat().st_size for f in files)
+            if size > settings.max_file_bytes:
+                # HLS downloads get past max_filesize (yt-dlp can't know their size up
+                # front): treat an oversized result like yt-dlp's own skip and try the
+                # next rung instead of handing the worker a file it will refuse.
+                log.info("rung_over_cap", url=url, rung=rung, bytes=size)
+                for f in files:
+                    f.unlink(missing_ok=True)
+                last = ExtractError(ErrorCode.TOO_LARGE, f"{rung}: {size} B over size cap")
+                continue
             return Extracted(files, meta=from_ytdlp(info, size) if info else None)
         # yt-dlp silently skips files over max_filesize: try the next rung.
         last = ExtractError(ErrorCode.TOO_LARGE, f"{rung} over size cap")
