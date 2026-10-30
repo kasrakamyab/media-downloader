@@ -57,8 +57,9 @@ def test_settings_roundtrip_and_defaults() -> None:
 
 def test_apply_transitions() -> None:
     s = GroupSettings()
+    assert s.auto  # on by default
     s = apply(s, "auto", "")
-    assert s.auto
+    assert not s.auto
     s = apply(s, "maxq", "")
     assert s.max_quality is Quality.P1080
     for _ in range(5):
@@ -88,10 +89,10 @@ def test_render_and_keyboard() -> None:
 async def test_registry_settings(redis) -> None:
     groups = GroupRegistry(redis)
     assert await groups.get_settings(GROUP) == GroupSettings()
-    await groups.save_settings(GROUP, GroupSettings(auto=True, max_quality=Quality.P360))
+    await groups.save_settings(GROUP, GroupSettings(auto=False, max_quality=Quality.P360))
     s = await groups.get_settings(GROUP)
-    assert s.auto and s.max_quality is Quality.P360
-    assert await groups.auto_count() == 1
+    assert not s.auto and s.max_quality is Quality.P360
+    assert await groups.auto_off_count() == 1
     await groups.add(GROUP, "g", "supergroup", 1)
     await groups.remove(GROUP)
     assert await groups.get_settings(GROUP) == GroupSettings()  # removed with the group
@@ -143,8 +144,8 @@ async def test_settings_tap_changes_and_guards(redis) -> None:
     q = FakeQuery(f"gs:{GROUP}:auto:", user_id=1)
     q.message = msg
     await on_settings_tap(q, bot, groups)
-    assert (await groups.get_settings(GROUP)).auto is True
-    assert msg.edits and "Auto-download: <b>on</b>" in msg.edits[-1][0]
+    assert (await groups.get_settings(GROUP)).auto is False  # toggled off from the default
+    assert msg.edits and "Auto-download: <b>off</b>" in msg.edits[-1][0]
 
     q = FakeQuery(f"gs:{GROUP}:plat:youtube", user_id=2)  # not an admin
     q.message = msg

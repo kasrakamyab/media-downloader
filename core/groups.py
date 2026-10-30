@@ -51,7 +51,10 @@ def within_cap(quality: Quality, cap: Quality) -> bool:
 class GroupSettings(BaseModel):
     """Per-group knobs, changed by group admins through /settings."""
 
-    auto: bool = False  # download every supported link without /dl (needs privacy off)
+    # Download every supported link posted in the group without /dl. On by default: it only
+    # takes effect where Telegram shows the bot plain messages (admin, or privacy off), and
+    # that is exactly where people expect a downloader bot to just work. /settings turns it off.
+    auto: bool = True
     max_quality: Quality = Quality.BEST
     platforms: list[Platform] = Field(default_factory=lambda: list(Platform))
 
@@ -172,9 +175,10 @@ class GroupRegistry:
     async def save_settings(self, chat_id: int, settings: GroupSettings) -> None:
         await self._redis.hset(settings_key(chat_id), mapping=settings.to_hash())
 
-    async def auto_count(self) -> int:
+    async def auto_off_count(self) -> int:
+        """Groups whose admins turned auto-download off (it is on by default)."""
         n = 0
         async for k in self._redis.scan_iter(match="group:*:settings"):
-            if await self._redis.hget(k, "auto") in (b"1", "1"):
+            if await self._redis.hget(k, "auto") in (b"0", "0"):
                 n += 1
         return n
