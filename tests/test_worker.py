@@ -10,7 +10,7 @@ from core.contracts import ErrorCode, Job, Platform, Quality
 from core.extractors import classify, ladder_for, ytdlp_format
 from core.limits import UserLimits
 from core.telegram import FakeSender
-from core.worker import ExtractError, collect_files, janitor_sweep, run_job
+from core.worker import Extracted, ExtractError, collect_files, janitor_sweep, run_job
 
 
 def make_job(url: str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ") -> Job:
@@ -52,6 +52,26 @@ async def test_success_path_uploads_caches_and_cleans(redis, settings) -> None:
     assert await FileCache(redis).get(job.url, Quality.BEST) == ["fake-file-id-1"]
     assert await redis.get("limits:active:20") is None  # slot released
     assert await redis.hget("stats:youtube", "ok") == b"1"
+
+
+async def test_degraded_result_is_captioned_uncached_and_flags_admin(redis, settings) -> None:
+    job = make_job("https://www.instagram.com/p/DfEciETonwc/")
+
+    async def extractor(job, dest, settings):
+        f = dest / "01.jpg"
+        f.write_bytes(b"x")
+        return Extracted(
+            [f], caption="⚠️ Preview only", cacheable=False, needs_login="preview stp=s640x640"
+        )
+
+    result, sender = await _run(job, extractor, redis, settings)
+    assert result.status == "ok"
+    assert sender.sent_files[0][2] == "⚠️ Preview only"  # caption went out with the file
+    assert await FileCache(redis).get(job.url, Quality.BEST) is None  # not cached
+    assert await redis.get("needs_login:youtube") == b"preview stp=s640x640"  # 🔑 alert
+    # the next request runs the extractor again instead of re-serving the preview
+    result2, sender2 = await _run(make_job(job.url), extractor, redis, settings)
+    assert not result2.cached and sender2.sent_files
 
 
 async def test_second_request_served_from_cache(redis, settings) -> None:

@@ -25,6 +25,13 @@ LABEL = {
 }
 
 
+COOKIES_VAR = {
+    Platform.YOUTUBE: "YT_COOKIES_FILE",
+    Platform.INSTAGRAM: "IG_COOKIES_FILE",
+    Platform.PINTEREST: "PIN_COOKIES_FILE",
+}
+
+
 def state_key(platform: Platform) -> str:
     return f"alert:down:{platform}"
 
@@ -61,8 +68,11 @@ async def check_once(redis: Redis, breaker: Breaker, settings: Settings) -> list
         if detail:
             detail = detail.decode() if isinstance(detail, bytes) else detail
             messages.append(
-                f"🔑 {LABEL[platform]} is asking for a login. Users get a 'not set up' reply "
-                f"until a cookies file is mounted (see docs/deploy.md).\n<code>{detail}</code>"
+                f"🔑 {LABEL[platform]} is asking for a login, so users get a 'not set up' "
+                f"reply. Fix: export cookies from a throwaway account and set "
+                f"<code>{COOKIES_VAR[platform]}</code> (docs/deploy.md → Cookies). If it is "
+                f"already set, the cookies have expired: export fresh ones.\n"
+                f"<code>{detail}</code>"
             )
     return messages
 

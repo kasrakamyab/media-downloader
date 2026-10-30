@@ -78,6 +78,7 @@ async def test_alert_login_required(redis, settings) -> None:
     msgs = await check_once(redis, b, settings)
     assert len(msgs) == 1 and msgs[0].startswith("🔑 Instagram is asking for a login")
     assert "redirect to login page" in msgs[0]
+    assert "<code>IG_COOKIES_FILE</code>" in msgs[0] and "throwaway account" in msgs[0]
     assert await check_once(redis, b, settings) == []  # flag consumed
 
 
