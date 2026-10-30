@@ -21,14 +21,14 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import aiohttp
 
 from core.contracts import ErrorCode
 from core.logging import get_logger
 from core.settings import Settings
-from core.worker import ExtractError
+from core.worker import Extracted, ExtractError
 
 log = get_logger("instagram.embed")
 
@@ -270,9 +270,37 @@ async def fetch_post_page(post_url: str, settings: Settings) -> str:
     return await _fetch_html(target, settings, "post page", {"User-Agent": PAGE_UA})
 
 
-async def og_download(post_url: str, dest: Path, settings: Settings) -> list[Path]:
-    """Cookie-less fallback #1: the post page's og:image / og:video. Covers single photos
-    fully; for carousels it is the first item only (logged)."""
+# Instagram's image transform parameter. `c<x>.<y>.<w>.<h>` is a server-side crop and
+# `s<W>x<H>` a downscale: `stp=c604.0.1815.1814a_dst-jpg_e35_s640x640_tt6` is a 640 px square
+# cut out of a 3024x4032 portrait (seen live). Such an og:image is a preview, not the photo.
+_STP_CROP_RE = re.compile(r"(?:^|_)c\d+\.\d+\.\d+\.\d+")
+_STP_SIZE_RE = re.compile(r"(?:^|_)s(\d+)x(\d+)")
+
+
+def crop_info(url: str) -> tuple[bool, str]:
+    """(is a crop or downscale, the raw stp value) for an Instagram CDN URL."""
+    stp = dict(parse_qsl(urlsplit(url).query)).get("stp", "")
+    return bool(_STP_CROP_RE.search(stp) or _STP_SIZE_RE.search(stp)), stp
+
+
+def preview_caption(stp: str, carousel: bool) -> str:
+    m = _STP_SIZE_RE.search(stp)
+    size = f"{m.group(1)} px" if m else "reduced-size"
+    what = "the first item, as a" if carousel else "a"
+    return (
+        f"⚠️ Preview only: Instagram served {what} {size} crop without a login. "
+        "Full size needs the bot to have Instagram cookies."
+    )
+
+
+async def og_download(post_url: str, dest: Path, settings: Settings) -> Extracted:
+    """Cookie-less fallback #1: the post page's og:image / og:video.
+
+    Delivered, but often degraded: logged-out pages carry a server-side square crop (the
+    full-size <img> is loaded by client JS), so a cropped/downscaled og:image goes out as a
+    captioned preview, is never cached, and raises the 🔑 alert for the admin. Carousels
+    give their first item only. A page with no og media is a login wall.
+    """
     page = await fetch_post_page(post_url, settings)
     items, carousel = parse_post_page(page)
     if not items:
@@ -281,7 +309,18 @@ async def og_download(post_url: str, dest: Path, settings: Settings) -> list[Pat
     if carousel:
         log.info("og_first_item_only", url=post_url, hint="carousel; rest needs a session")
     await asyncio.to_thread(dest.mkdir, parents=True, exist_ok=True)
-    return await download_items(items, dest, settings)
+    files = await download_items(items, dest, settings)
+    cropped, stp = crop_info(items[0].url)
+    if not cropped and not carousel:
+        return Extracted(files)
+    if cropped:
+        log.info("og_preview_cropped", url=post_url, stp=stp, bytes=files[0].stat().st_size)
+    return Extracted(
+        files,
+        caption=preview_caption(stp, carousel),
+        cacheable=False,
+        needs_login=f"served a logged-out preview (stp={stp or 'n/a'}, carousel={carousel})",
+    )
 
 
 def _title(page: str) -> str:

@@ -13,7 +13,7 @@ from core.extractors import gallerydl_download, ytdlp_download
 from core.instagram_embed import embed_download, og_download
 from core.logging import get_logger
 from core.settings import Settings
-from core.worker import ExtractError, build_worker_settings
+from core.worker import Extracted, ExtractError, build_worker_settings
 
 log = get_logger("worker.instagram")
 
@@ -28,7 +28,7 @@ async def _ytdlp(job: Job, dest: Path, settings: Settings, cookies: str | None) 
     return await ytdlp_download(job.url, dest, Quality.BEST, settings, cookies)
 
 
-async def _ogpage(job: Job, dest: Path, settings: Settings, cookies: str | None) -> list[Path]:
+async def _ogpage(job: Job, dest: Path, settings: Settings, cookies: str | None) -> Extracted:
     return await og_download(job.url, dest, settings)
 
 
@@ -36,7 +36,7 @@ async def _embed(job: Job, dest: Path, settings: Settings, cookies: str | None) 
     return await embed_download(job.url, dest, settings)
 
 
-async def extract(job: Job, dest: Path, settings: Settings) -> list[Path]:
+async def extract(job: Job, dest: Path, settings: Settings) -> list[Path] | Extracted:
     cookies = settings.ig_cookies_file
     # With a session, gallery-dl handles everything. Without one it hits the login wall on
     # almost all posts; yt-dlp still gets public reels, and the embed page gets public

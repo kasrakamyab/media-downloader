@@ -114,9 +114,11 @@ supported JavaScript runtime" warning means an old image — rebuild.
 **"That platform wants a login" (`LOGIN_REQUIRED`).** Without a session the Instagram
 worker tries yt-dlp (reels), gallery-dl (usually a login wall), then two cookie-less
 fallbacks: the **post page's `og:image`/`og:video`** (a plain logged-out GET of
-`instagram.com/p/<id>/`; this served the full-size photo from a VPN exit where everything
-else was walled — single photos are covered, carousels give their first item only, logged as
-`og_first_item_only`) and the embed page (full carousels from residential IPs; from
+`instagram.com/p/<id>/`). That page was served from a VPN exit where everything else was
+walled, **but its og:image is a 640 px square crop** of the real photo (the full-size image
+is loaded by client-side JS), so the bot sends it as a *preview* with a caption saying so,
+never caches it, and raises the 🔑 alert; carousels give their first item only (logged as
+`og_first_item_only`, `og_preview_cropped`). Then the embed page (full carousels from residential IPs; from
 data-center / VPN exits a generic login shell, logged as `embed_shell_no_media`). Whether
 the og path works depends on the exit IP, so **on a server plan for `IG_COOKIES_FILE`** —
 the same situation as YouTube behind a data-center IP. The admin gets a 🔑 alert naming the

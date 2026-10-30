@@ -12,6 +12,7 @@ from aiohttp import web
 from core.contracts import ErrorCode, Job, Platform
 from core.instagram_embed import (
     EmbedItem,
+    crop_info,
     download_items,
     embed_download,
     embed_url,
@@ -21,6 +22,7 @@ from core.instagram_embed import (
     parse_embed,
     parse_post_page,
     post_page_url,
+    preview_caption,
 )
 from core.worker import ExtractError
 from workers.instagram import worker as ig
@@ -90,7 +92,7 @@ def test_bare_shortcode_media_blob() -> None:
 # ---- the post page's og tags (the path that works from the VPN exit) ---------------------
 
 
-def test_post_page_photo_og_image_is_the_full_size_photo() -> None:
+def test_post_page_photo_og_image_is_a_cropped_preview() -> None:
     items, carousel = parse_post_page(_page("post_page_photo.html"))
     assert len(items) == 1 and items[0].kind == "image" and not carousel
     url = items[0].url
@@ -98,6 +100,19 @@ def test_post_page_photo_og_image_is_the_full_size_photo() -> None:
     assert "&amp;" not in url and "&_nc_ht=scontent-fra5-1.cdninstagram.com" in url  # unescaped
     tags = og_tags(_page("post_page_photo.html"))
     assert tags["og:type"] == "article" and tags["og:title"] == 'Kasra on Instagram: "Meow"'
+    # the live finding: og:image is a 640 px square crop of a 3024x4032 portrait
+    cropped, stp = crop_info(url)
+    assert cropped and stp == "c604.0.1815.1814a_dst-jpg_e35_s640x640_tt6"
+
+
+def test_crop_detection_and_caption() -> None:
+    assert crop_info("https://cdn/x.jpg?stp=dst-jpg_e35_tt6&oh=1") == (False, "dst-jpg_e35_tt6")
+    assert crop_info("https://cdn/x.jpg?oh=1") == (False, "")
+    assert crop_info("https://cdn/x.jpg?stp=dst-jpg_e35_s1080x1350")[0] is True  # downscale
+    assert crop_info("https://cdn/x.jpg?stp=c0.100.800.800a_dst-jpg")[0] is True  # crop
+    cap = preview_caption("c604.0.1815.1814a_dst-jpg_e35_s640x640_tt6", carousel=False)
+    assert cap.startswith("⚠️ Preview only") and "640 px crop" in cap and "cookies" in cap
+    assert "first item" in preview_caption("dst-jpg_e35_s640x640", carousel=True)
 
 
 def test_post_page_reel_prefers_og_video() -> None:
@@ -256,11 +271,39 @@ async def test_og_download_end_to_end(aiohttp_server_factory, settings, tmp_path
     monkeypatch.setattr(mod, "post_page_url", lambda u: site + u)
     # the local stand-in for the CDN must pass the media-host check
     monkeypatch.setattr(mod, "_MEDIA_HOST_RE", re.compile(r"^http://127\.0\.0\.1:"))
-    files = await og_download("/p/ok/", tmp_path / "j", settings)
+    got = await og_download("/p/ok/", tmp_path / "j", settings)
+    files = got.files
     assert [f.name for f in files] == ["01.jpg"] and files[0].read_bytes() == b"\xff\xd8photo"
+    # the fixture's og:image URL lost its stp when rewritten to the local server, so this
+    # is the "uncropped" case: plain result, cacheable, no caption
+    assert got.caption is None and got.cacheable and got.needs_login is None
     with pytest.raises(ExtractError) as e:
         await og_download("/p/login/", tmp_path / "k", settings)
     assert e.value.code is ErrorCode.LOGIN_REQUIRED
+
+
+async def test_og_download_cropped_is_a_captioned_preview(
+    aiohttp_server_factory, settings, tmp_path, monkeypatch
+):
+    base = await aiohttp_server_factory({"/crop.jpg": b"\xff\xd8crop"})
+    page = _page("post_page_photo.html")
+    real = og_tags(page)["og:image"]
+    local = f"{base}/crop.jpg?stp=c604.0.1815.1814a_dst-jpg_e35_s640x640_tt6&oh=x"
+    page = page.replace(html.escape(real, quote=True), html.escape(local, quote=True))
+    site = await aiohttp_server_factory(
+        {"/p/crop/": web.Response(text=page, content_type="text/html")}
+    )
+    import re
+
+    import core.instagram_embed as mod
+
+    monkeypatch.setattr(mod, "post_page_url", lambda u: site + u)
+    monkeypatch.setattr(mod, "_MEDIA_HOST_RE", re.compile(r"^http://127\.0\.0\.1:"))
+    got = await og_download("/p/crop/", tmp_path / "j", settings)
+    assert got.files[0].read_bytes() == b"\xff\xd8crop"
+    assert got.caption and got.caption.startswith("⚠️ Preview only") and "640 px" in got.caption
+    assert got.cacheable is False
+    assert got.needs_login and "s640x640" in got.needs_login
 
 
 async def test_worker_falls_through_to_og_page_without_cookies(monkeypatch, settings, tmp_path):

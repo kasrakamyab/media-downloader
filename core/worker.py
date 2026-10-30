@@ -11,6 +11,7 @@ import asyncio
 import shutil
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +44,23 @@ from core.telegram import DeliveryError, ForbiddenError, Sender, TelegramSender,
 
 log = get_logger("worker")
 
-# Extractor: (job, dest_dir, settings) -> list of downloaded files. Must raise ExtractError.
-Extractor = Callable[[Job, Path, Settings], Awaitable[list[Path]]]
+
+@dataclass(slots=True)
+class Extracted:
+    """What an extractor hands back when plain files aren't the whole story: a caption to
+    send with them, whether the result may be cached (a degraded preview must not be: the
+    next request might have cookies), and whether the admin should hear that a session
+    would have done better."""
+
+    files: list[Path]
+    caption: str | None = None
+    cacheable: bool = True
+    needs_login: str | None = None  # detail for the 🔑 alert, when a session was missing
+
+
+# Extractor: (job, dest_dir, settings) -> downloaded files, or Extracted. Must raise
+# ExtractError on failure.
+Extractor = Callable[[Job, Path, Settings], Awaitable[list[Path] | Extracted]]
 # Prober: (url, settings) -> (format options, title). Only for platforms with a quality menu.
 Prober = Callable[[str, Settings], Awaitable[tuple[list[FormatOption], str | None]]]
 
@@ -127,9 +143,10 @@ async def run_job(
         if free_bytes(Path(settings.job_dir)) < settings.min_free_gb * 1024**3:
             raise ExtractError(ErrorCode.SOURCE_DOWN, "low disk")
 
-        files = await _extract_with_retries(job, dest, extractor, settings, log_)
+        out = await _extract_with_retries(job, dest, extractor, settings, log_)
+        extracted = out if isinstance(out, Extracted) else Extracted(list(out))
 
-        files = [f for f in files if f.is_file() and f.stat().st_size > 0]
+        files = [f for f in extracted.files if f.is_file() and f.stat().st_size > 0]
         if not files:
             raise ExtractError(ErrorCode.UNKNOWN, "no files produced")
         too_big = [f for f in files if f.stat().st_size > settings.max_file_bytes]
@@ -140,7 +157,7 @@ async def run_job(
             file_ids = await sender.send_files(
                 job.chat_id,
                 files,
-                None,
+                extracted.caption,
                 reply_to=job.reply_to_message_id,
                 thread_id=job.thread_id,
             )
@@ -148,10 +165,18 @@ async def run_job(
             raise ExtractError(ErrorCode.FORBIDDEN, str(e)) from e
         except DeliveryError as e:
             raise ExtractError(ErrorCode.UPLOAD_FAILED, str(e)) from e
-        await cache.set(job.url, job.quality, file_ids)
+        if extracted.cacheable:
+            await cache.set(job.url, job.quality, file_ids)
+        if extracted.needs_login:
+            await flag_login_required(redis, job.platform, extracted.needs_login)
         await _finish_ok(sender, job)
         result = Result.ok(job.job_id, file_ids, _ms(started))
-        log_.info("job_done", files=len(files), took_ms=result.took_ms)
+        log_.info(
+            "job_done",
+            files=len(files),
+            took_ms=result.took_ms,
+            degraded=bool(extracted.caption),
+        )
         return result
 
     except ExtractError as e:
@@ -199,7 +224,7 @@ def _fresh_dir(dest: Path) -> None:
 
 async def _extract_with_retries(
     job: Job, dest: Path, extractor: Extractor, settings: Settings, log_: Any
-) -> list[Path]:
+) -> list[Path] | Extracted:
     """Run the extractor; retry transient failures with linear backoff, nothing else."""
     attempts = 1 + max(settings.transient_retries, 0)
     per_attempt = settings.extract_timeout + settings.download_timeout
