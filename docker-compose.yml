@@ -68,7 +68,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api,pot-provider
       no_proxy: localhost,127.0.0.1,redis,telegram-bot-api,pot-provider
-      WORKER_CONCURRENCY: ${YT_CONCURRENCY:-3}
+      WORKER_CONCURRENCY: ${YT_CONCURRENCY:-2}
       POT_PROVIDER_URL: ${POT_PROVIDER_URL:-http://pot-provider:4416}
     depends_on:
       redis:
@@ -78,7 +78,7 @@ services:
     volumes:
       - ./secrets:/secrets:ro
     healthcheck: *worker-health
-    mem_limit: 512m
+    mem_limit: 1536m
 
   worker-instagram:
     <<: *service

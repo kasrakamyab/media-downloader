@@ -1,6 +1,9 @@
 # Deploying to a VPS (step 11)
 
 One 2 vCPU / 4 GB box (Hetzner CX22/CX23 class) runs everything. Ubuntu 24.04 assumed.
+Memory plan on 4 GB: `worker-youtube` 1.5 GB (deno solves YouTube's JS challenges inside
+each job; below ~1 GB it gets OOM-killed and downloads fail), the other two workers ~0.6 GB,
+gateway + Redis + Caddy + pot-provider ~0.7 GB, the rest for the OS and page cache.
 
 ## One-time setup
 
@@ -141,12 +144,27 @@ never caches it, and raises the 🔑 alert; carousels give their first item only
 data-center / VPN exits a generic login shell, logged as `embed_shell_no_media`). Whether
 the og path works depends on the exit IP, so **on a server plan for `IG_COOKIES_FILE`** —
 the same situation as YouTube behind a data-center IP. The admin gets a 🔑 alert naming the
-variable to set. Fix: export cookies from a browser
-where a throwaway account is logged in (any "Get cookies.txt" extension, Netscape format),
-put the file in `./secrets/` and set `IG_COOKIES_FILE=/secrets/instagram.txt` (or
-`YT_COOKIES_FILE`). Use an account you don't care about; export from a private window and
-don't keep using that session in the browser, or the cookies rotate and expire. When the
-cookies die, the same 🔑 alert tells you.
+variable to set. Fix: a cookies file from a throwaway account, exported **this way** (the
+order matters for YouTube):
+
+1. Open a private/incognito window, log in to the throwaway account.
+2. Export the cookies with any "Get cookies.txt" extension (Netscape format).
+3. **Close the incognito window right away** and don't log in with that account anywhere
+   else. A browser that stays logged in rotates the session cookies, and yt-dlp then reports
+   "The provided YouTube account cookies are no longer valid".
+4. Put the file in `./secrets/` (owned by uid 1000, see above) and set
+   `YT_COOKIES_FILE=/secrets/youtube.txt` / `IG_COOKIES_FILE=/secrets/instagram.txt`.
+
+When the cookies die, the same 🔑 alert tells you; repeat the four steps.
+
+**YouTube: "Requested format is not available" / only storyboards, and `dmesg` shows
+`Killed process (deno)`.** The YouTube worker runs deno to solve YouTube's JavaScript
+challenges; when the container's memory limit kills it, yt-dlp is left with storyboard images
+only. The worker idles at ~165 MB and each job's deno run needs a few hundred MB more, so
+`worker-youtube` ships with `mem_limit: 1536m` and `YT_CONCURRENCY=2` (plan ~1.5 GB of the
+box for it). The job's error detail now says "YouTube JS challenge solver failed … usually
+OOM-killed" and the worker logs `js_runtime_failed`; if you see it, raise the limit or lower
+the concurrency rather than looking at formats.
 
 **"The upload to Telegram timed out" (`UPLOAD_FAILED`).** The download worked; the push
 to `api.telegram.org` was too slow for the request timeout. The timeout scales with file

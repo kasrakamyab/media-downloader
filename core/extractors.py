@@ -90,6 +90,39 @@ _NET_RE = re.compile(
 
 
 NO_FORMAT = "requested format is not available"
+_JS_RE = re.compile(
+    r"deno|node|javascript runtime|js runtime|jsi|challenge|signature|n function|nsig|"
+    r"ejs|remote component",
+    re.IGNORECASE,
+)
+
+
+class YtdlpLog:
+    """Collects yt-dlp's warnings so a failure can be explained. When the JS runtime that
+    solves YouTube's challenges dies, yt-dlp only warns ("Signature solving failed",
+    "challenge", "deno …") and then every real format is missing; without the warning the
+    user would just see "format not available"."""
+
+    def __init__(self) -> None:
+        self.last_js_warning = ""
+
+    def debug(self, msg: str) -> None:  # yt-dlp sends its normal output here too
+        pass
+
+    def info(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        if _JS_RE.search(msg):
+            self.last_js_warning = msg
+
+    def error(self, msg: str) -> None:
+        if _JS_RE.search(msg):
+            self.last_js_warning = msg
+
+    @property
+    def js_runtime_failed(self) -> bool:
+        return bool(self.last_js_warning)
 
 
 def classify(message: str) -> ErrorCode:
@@ -187,6 +220,8 @@ def _ytdlp_once(
     if settings.rate_limit:
         opts["ratelimit"] = yt_dlp.utils.parse_bytes(settings.rate_limit)
     info: dict = {}
+    warnings = YtdlpLog()
+    opts["logger"] = warnings
     try:
         with cookie_copy(cookies, dest) as jar:
             if jar:
@@ -195,7 +230,16 @@ def _ytdlp_once(
                 raw = ydl.extract_info(url, download=True)
                 info = ydl.sanitize_info(raw) if raw else {}
     except yt_dlp.utils.DownloadError as e:
-        raise ExtractError(classify(str(e)), str(e)) from e
+        detail = str(e)
+        if NO_FORMAT in detail.lower() and warnings.js_runtime_failed:
+            # The JS challenge solver (deno) died — on a server almost always the memory
+            # limit — so only storyboard images were left to choose from.
+            log.error("js_runtime_failed", url=url, warning=warnings.last_js_warning[:200])
+            detail = (
+                "YouTube JS challenge solver failed (deno; usually OOM-killed — raise "
+                f"worker-youtube's mem_limit, see docs/deploy.md): {warnings.last_js_warning}"
+            )
+        raise ExtractError(classify(str(e)), detail) from e
     except OSError as e:
         # Disk full, permissions, a mount gone read-only: a configuration problem, not
         # something a retry on the next rung would change.

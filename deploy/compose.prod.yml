@@ -29,7 +29,7 @@ services:
     build: !reset null
     environment:
       REDIS_URL: redis://redis:6379/0
-      WORKER_CONCURRENCY: ${YT_CONCURRENCY:-3}
+      WORKER_CONCURRENCY: ${YT_CONCURRENCY:-2}
       LOG_JSON: "true"
   worker-instagram:
     <<: *prod
