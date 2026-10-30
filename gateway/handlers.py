@@ -77,10 +77,10 @@ HELP = (
 )
 
 
-def group_help(bot_username: str, can_see: bool, joined: bool = False) -> str:
+def group_help(bot_username: str, can_see: bool, joined: bool = False, auto: bool = True) -> str:
     """What works in this group right now. With privacy mode on and no admin rights Telegram
-    only delivers /commands and replies to the bot, so mentions and auto-download are listed
-    only when the bot can actually receive plain messages."""
+    only delivers /commands and replies to the bot; as an admin the bot sees every message
+    and, unless admins turned it off, grabs every link on its own."""
     bot = bot_username or "bot"
     head = "👋 Thanks for adding me. " if joined else ""
     ways = [
@@ -89,25 +89,32 @@ def group_help(bot_username: str, can_see: bool, joined: bool = False) -> str:
     ]
     if can_see:
         ways.append(f"• <code>@{bot} &lt;link&gt;</code>")
-        tail = (
-            "I can see links here, so admins can also turn on <b>auto-download</b> in "
-            "/settings and I'll fetch every supported link without being asked."
-        )
+        if auto:
+            lead = (
+                "I'm an admin here, so <b>just post a link and I'll grab it</b> — no command "
+                "needed. You can also ask explicitly:\n"
+            )
+            tail = "Admins: /settings turns auto-download off or caps the quality."
+        else:
+            lead = "Auto-download is off in this group (admins: /settings). Ask me with:\n"
+            tail = ""
     else:
+        lead = "Ask me with:\n"
         tail = (
-            "<b>Make me an admin</b> so I can see links. Right now Telegram only shows me "
-            "/dl commands and replies to my messages; as an admin I also catch "
-            f"<code>@{bot} &lt;link&gt;</code> and admins can turn on auto-download in /settings."
+            "<b>Make me an admin</b> and I'll grab every link posted here on my own. Until "
+            "then Telegram only shows me /dl commands and replies to my messages."
         )
-    return (
-        f"{head}Ask me with:\n" + "\n".join(ways) + "\nI reply to the message that had the "
-        f"link; add <code>audio</code> for sound only.\n\n{tail}"
+    body = (
+        "\n".join(ways)
+        + "\nI reply to the message that had the link; add <code>audio</code> for sound only."
     )
+    return f"{head}{lead}{body}" + (f"\n\n{tail}" if tail else "")
 
 
 PROMOTED_TEXT = (
-    "Thanks for making me an admin! I can now see links here: mention me with "
-    "<code>@{bot} &lt;link&gt;</code>, or admins turn on auto-download in /settings."
+    "Thanks for making me an admin! From now on just post a link and I'll grab it; "
+    "<code>@{bot} &lt;link&gt;</code> and /dl work too. Admins: /settings to turn "
+    "auto-download off or cap the quality."
 )
 DEMOTED_TEXT = (
     "I've lost admin rights, so Telegram will only show me <code>/dl</code> commands and "
@@ -262,11 +269,13 @@ async def on_help(
     identity: BotIdentity | None = None,
     bot_username: str = "",
     bot_can_read_all: bool = False,
+    groups: GroupRegistry | None = None,
 ) -> None:
     if is_group(message):
         username, read_all = _who(identity, bot_username, bot_can_read_all)
         can_see = await bot_can_see(bot, message.chat.id, read_all)
-        await say(message, group_help(username, can_see))
+        auto = (await groups.get_settings(message.chat.id)).auto if groups else True
+        await say(message, group_help(username, can_see, auto=auto))
         return
     await message.answer(_help(settings))
 
@@ -309,7 +318,7 @@ async def on_stats(
     if groups is not None:
         lines.append(
             f"<b>Groups</b>: {await groups.count()} joined, "
-            f"{await groups.auto_count()} with auto-download"
+            f"{await groups.auto_off_count()} with auto-download turned off"
         )
     lines.append(f"<b>Total</b>: ok={total['ok']} err={total['error']}")
     await message.answer("\n".join(lines))
@@ -387,12 +396,21 @@ async def on_text(
 ) -> None:
     if not message.from_user:
         return
-    bot_username, _ = _who(identity, bot_username, False)
+    bot_username, read_all = _who(identity, bot_username, False)
     group = is_group(message)
+    if group and getattr(message.from_user, "is_bot", False):
+        return  # another bot (e.g. a second downloader in the same group): never a request
     gs = await groups.get_settings(message.chat.id) if (group and groups) else GroupSettings()
     ask = extract_ask(message, bot_username, auto=gs.auto)
     if ask is None:
         return  # a group message that isn't for us
+    if not ask.explicit and groups is not None and not read_all:
+        # Plain link in auto mode: only where Telegram is known to show us messages (admin
+        # here, or privacy off). A stale "can_see=0" after a promotion is corrected by the
+        # my_chat_member update that promotion sends.
+        info = await groups.get(message.chat.id)
+        if info is not None and info.get("can_see") == "0":
+            return
 
     async def tell(text: str) -> None:
         """User-facing refusals: spoken when asked, swallowed in auto mode."""
@@ -420,6 +438,18 @@ async def on_text(
             "(admins: /settings)."
         )
         return
+
+    if not ask.explicit:
+        # Two people sharing the same video within a couple of minutes get one download.
+        fresh = await arq.set(
+            f"recent:{message.chat.id}:{url_hash(found.url)}",
+            "1",
+            ex=settings.auto_dedupe_seconds,
+            nx=True,
+        )
+        if not fresh:
+            log.info("auto_duplicate_skipped", chat_id=message.chat.id, url=found.url)
+            return
 
     quality = Quality.BEST
     if found.platform == Platform.YOUTUBE and "audio" in ask.text.lower().split():

@@ -26,7 +26,7 @@ class FakeMessage:
         self.caption = caption
         self.entities = entities
         self.caption_entities = None
-        self.from_user = SimpleNamespace(id=user_id)
+        self.from_user = SimpleNamespace(id=user_id, is_bot=False)
         self.chat = SimpleNamespace(id=chat_id, type=chat_type, title="Test group")
         self.reply_to_message = reply_to
         self.message_thread_id = thread_id

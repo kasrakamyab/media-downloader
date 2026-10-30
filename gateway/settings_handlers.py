@@ -50,9 +50,10 @@ def render(title: str, s: GroupSettings) -> str:
     auto = "on" if s.auto else "off"
     return (
         f"⚙️ <b>Settings for {escape(title or 'this group')}</b>\n\n"
-        f"Auto-download: <b>{auto}</b> — when on, I fetch every supported link posted here "
-        f"without /dl, quietly and without a quality menu. Telegram only shows me those "
-        f"messages if the bot is an admin or privacy mode is off (BotFather /setprivacy).\n"
+        f"Auto-download: <b>{auto}</b> (on by default) — when on, I fetch every supported "
+        f"link posted here without /dl, quietly and without a quality menu. Telegram only "
+        f"shows me those messages if the bot is an admin or privacy mode is off "
+        f"(BotFather /setprivacy).\n"
         f"Max quality: <b>{quality}</b>\n"
         f"Platforms: <b>{platforms}</b>\n\n"
         f"Tap to change. Admins only."

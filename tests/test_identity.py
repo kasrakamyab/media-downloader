@@ -9,10 +9,11 @@ import pytest
 from aiogram import Dispatcher
 from aiogram.exceptions import TelegramNetworkError
 from arq.connections import ArqRedis
+from arq.jobs import deserialize_job
 
 from core.breaker import Breaker
-from core.cache import FileCache
-from core.contracts import QUEUE_NAMES, Platform
+from core.cache import FileCache, url_hash
+from core.contracts import QUEUE_NAMES, Job, Platform
 from core.groups import GroupRegistry
 from core.health import beat
 from core.limits import UserLimits
@@ -66,9 +67,16 @@ async def test_unresolved_identity_falls_back_to_kwargs(arq, deps) -> None:
     m = FakeMessage(f"@Mamad_AlertsBot {YT}", chat_id=GROUP, chat_type="supergroup")
     await on_text(m, identity=BotIdentity(), bot_username="Mamad_AlertsBot", **deps)
     assert await arq.zcard(QUEUE_NAMES[Platform.YOUTUBE]) == 1
+    # nothing known: the mention is not recognised as an explicit ask. The link is still
+    # picked up by auto-download (quietly), so tell the two apart by the job's `quiet`.
+    await arq.delete(f"recent:{GROUP}:{url_hash(YT)}")  # same link again: bypass the dedupe
     m2 = FakeMessage(f"@Mamad_AlertsBot {YT}", chat_id=GROUP, chat_type="supergroup")
-    await on_text(m2, identity=BotIdentity(), **deps)  # nothing known: mention ignored
-    assert await arq.zcard(QUEUE_NAMES[Platform.YOUTUBE]) == 1
+    await on_text(m2, identity=BotIdentity(), **deps)
+    jobs = []
+    for jid in await arq.zrange(QUEUE_NAMES[Platform.YOUTUBE], 0, -1):
+        raw = await arq.get(f"arq:job:{jid.decode()}")
+        jobs.append(Job.model_validate(deserialize_job(raw).args[0]))
+    assert [j.quiet for j in jobs] == [False, True]
 
 
 async def test_resolve_identity_retries_then_fills(redis) -> None:

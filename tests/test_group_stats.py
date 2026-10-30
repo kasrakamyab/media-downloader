@@ -62,12 +62,12 @@ async def test_stats_output_shows_split_and_group_counts(arq, settings) -> None:
     groups = GroupRegistry(arq)
     await groups.add(-1, "A", "supergroup", 1)
     await groups.add(-2, "B", "supergroup", 1)
-    await groups.save_settings(-2, GroupSettings(auto=True))
+    await groups.save_settings(-2, GroupSettings(auto=False))
     settings.admin_ids = "1"
     m = FakeMessage("/stats", user_id=1)
     await on_stats(m, settings, arq, Breaker(arq), groups)
     text = m.answers[0]
     assert "<b>YouTube</b>" in text and "ok=2 err=0" in text and "in groups: ok=1 err=0" in text
     assert "<b>Instagram</b>" in text and "in groups: ok=0 err=1" in text
-    assert "<b>Groups</b>: 2 joined, 1 with auto-download" in text
+    assert "<b>Groups</b>: 2 joined, 1 with auto-download turned off" in text
     assert "<b>Total</b>: ok=2 err=1" in text
