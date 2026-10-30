@@ -7,7 +7,7 @@ from pathlib import Path
 
 from core.cache import FileCache
 from core.contracts import ErrorCode, Job, Platform, Quality
-from core.extractors import classify, ladder_for, ytdlp_format
+from core.extractors import classify, ladder_for, ytdlp_format, ytdlp_sort
 from core.limits import UserLimits
 from core.telegram import FakeSender
 from core.worker import Extracted, ExtractError, collect_files, janitor_sweep, run_job
@@ -181,7 +181,8 @@ def test_ladder_and_format() -> None:
     assert ladder_for(Quality.P480) == [Quality.P480, Quality.P360, Quality.AUDIO]
     assert ladder_for(Quality.P1080)[0] is Quality.P1080
     assert ladder_for(Quality.AUDIO) == [Quality.AUDIO]
-    assert "height<=360" in ytdlp_format(Quality.P360)
+    assert ytdlp_sort(Quality.P360)[0] == "res:360"  # the rung lives in format_sort now
+    assert "bv*+ba" in ytdlp_format(Quality.P360)  # any video+audio pair is acceptable
     assert ytdlp_format(Quality.AUDIO).startswith("ba")
 
 
