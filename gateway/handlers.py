@@ -45,6 +45,7 @@ from core.health import is_alive, stats
 from core.limits import UserLimits
 from core.logging import get_logger
 from core.settings import Settings
+from gateway.identity import BotIdentity
 
 log = get_logger("gateway")
 router = Router()
@@ -226,17 +227,29 @@ async def bot_can_see(bot: Bot, chat_id: int, bot_can_read_all: bool) -> bool:
     return member.status == "administrator"
 
 
+def _who(
+    identity: BotIdentity | None, bot_username: str, bot_can_read_all: bool
+) -> tuple[str, bool]:
+    """Username and privacy-off flag: from the live identity holder when the dispatcher
+    provides one (always, in production), else from the plain kwargs (tests)."""
+    if identity is not None and identity.resolved:
+        return identity.username, identity.can_read_all
+    return bot_username, bot_can_read_all
+
+
 @router.message(CommandStart())
 async def on_start(
     message: Message,
     settings: Settings,
     bot: Bot,
+    identity: BotIdentity | None = None,
     bot_username: str = "",
     bot_can_read_all: bool = False,
 ) -> None:
     if is_group(message):
-        can_see = await bot_can_see(bot, message.chat.id, bot_can_read_all)
-        await say(message, group_help(bot_username, can_see))
+        username, read_all = _who(identity, bot_username, bot_can_read_all)
+        can_see = await bot_can_see(bot, message.chat.id, read_all)
+        await say(message, group_help(username, can_see))
         return
     await message.answer("👋 Hi! " + _help(settings))
 
@@ -246,12 +259,14 @@ async def on_help(
     message: Message,
     settings: Settings,
     bot: Bot,
+    identity: BotIdentity | None = None,
     bot_username: str = "",
     bot_can_read_all: bool = False,
 ) -> None:
     if is_group(message):
-        can_see = await bot_can_see(bot, message.chat.id, bot_can_read_all)
-        await say(message, group_help(bot_username, can_see))
+        username, read_all = _who(identity, bot_username, bot_can_read_all)
+        can_see = await bot_can_see(bot, message.chat.id, read_all)
+        await say(message, group_help(username, can_see))
         return
     await message.answer(_help(settings))
 
@@ -315,12 +330,14 @@ async def on_my_chat_member(
     event: ChatMemberUpdated,
     bot: Bot,
     groups: GroupRegistry,
+    identity: BotIdentity | None = None,
     bot_username: str = "",
     bot_can_read_all: bool = False,
 ) -> None:
     chat = event.chat
     if chat.type not in GROUP_TYPES:
         return  # private block/unblock, channels: nothing to track yet
+    bot_username, bot_can_read_all = _who(identity, bot_username, bot_can_read_all)
     old, new = event.old_chat_member.status, event.new_chat_member.status
     # The update itself says whether we're an admin now; no extra API call needed.
     can_see = bot_can_read_all or new == "administrator"
@@ -366,9 +383,11 @@ async def on_text(
     breaker: Breaker,
     bot_username: str = "",
     groups: GroupRegistry | None = None,
+    identity: BotIdentity | None = None,
 ) -> None:
     if not message.from_user:
         return
+    bot_username, _ = _who(identity, bot_username, False)
     group = is_group(message)
     gs = await groups.get_settings(message.chat.id) if (group and groups) else GroupSettings()
     ask = extract_ask(message, bot_username, auto=gs.auto)
