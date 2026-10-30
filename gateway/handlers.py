@@ -46,8 +46,8 @@ from core.health import is_alive, stats
 from core.limits import UserLimits
 from core.logging import get_logger
 from core.settings import Settings
-from gateway.identity import BotIdentity
 from core.telegram import REACT_WORKING
+from gateway.identity import BotIdentity
 
 log = get_logger("gateway")
 router = Router()
