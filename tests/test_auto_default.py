@@ -54,7 +54,7 @@ async def _queued(arq: ArqRedis) -> list[Job]:
         for jid in await arq.zrange(QUEUE_NAMES[platform], 0, -1):
             raw = await arq.get(f"arq:job:{jid.decode()}")
             out.append(Job.model_validate(deserialize_job(raw).args[0]))
-    return out
+    return sorted(out, key=lambda j: j.requested_at)  # the queue zset has no stable order
 
 
 async def test_plain_link_in_group_with_admin_bot_is_downloaded(arq, deps) -> None:

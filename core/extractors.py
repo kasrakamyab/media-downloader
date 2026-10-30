@@ -18,8 +18,11 @@ from pathlib import Path
 
 from core.captions import MediaMeta, from_gallerydl, from_ytdlp
 from core.contracts import ErrorCode, FormatOption, Quality
+from core.logging import get_logger
 from core.settings import Settings
 from core.worker import Extracted, ExtractError, collect_files
+
+log = get_logger("extractors")
 
 
 def gallerydl_meta(dest: Path, files: list[Path], platform: str, url: str) -> MediaMeta | None:
@@ -86,9 +89,17 @@ _NET_RE = re.compile(
 )
 
 
+NO_FORMAT = "requested format is not available"
+
+
 def classify(message: str) -> ErrorCode:
-    if "unsupported url" in message.lower():
+    lowered = message.lower()
+    if "unsupported url" in lowered:
         return ErrorCode.UNSUPPORTED_URL
+    if NO_FORMAT in lowered:
+        # Our selector matched nothing; says nothing about the post. Must not read as
+        # PRIVATE through the generic "not available" pattern below.
+        return ErrorCode.UNKNOWN
     if _RATE_RE.search(message):
         return ErrorCode.RATE_LIMITED
     if _NET_RE.search(message):  # before PRIVATE: a proxy 403 is the network, not the post
@@ -110,10 +121,23 @@ _HEIGHT = {Quality.P1080: 1080, Quality.P720: 720, Quality.P480: 480, Quality.P3
 
 
 def ytdlp_format(quality: Quality) -> str:
+    """Format selector: prefer mp4 video + m4a audio, but accept any video-only + any
+    audio-only pair (Pinterest HLS has video-only mp4 streams and an mp4 audio stream, no
+    m4a and no muxed format) before falling back to a muxed file. The size rung is applied
+    through `ytdlp_sort`, not here, so vertical videos aren't judged by their height."""
     if quality == Quality.AUDIO:
         return "ba[ext=m4a]/ba/b"
+    return "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b[ext=mp4]/b/bv*"
+
+
+def ytdlp_sort(quality: Quality) -> list[str]:
+    """`format_sort` for a rung: `res:<h>` prefers the best format whose *shorter* side is
+    at most h (so a 720x1280 portrait counts as 720p, not 1280p), then mp4/m4a, then
+    bitrate. Formats above the rung are still considered last, never excluded."""
+    if quality == Quality.AUDIO:
+        return ["abr", "ext:m4a"]
     h = _HEIGHT.get(quality, 720)
-    return f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/b[height<={h}][ext=mp4]/b[height<={h}]/b"
+    return [f"res:{h}", "ext:mp4:m4a", "tbr"]
 
 
 def ladder_for(quality: Quality) -> list[Quality]:
@@ -153,6 +177,7 @@ def _ytdlp_once(
 
     opts: dict = ytdlp_common_opts(settings, cookies) | {
         "format": ytdlp_format(quality),
+        "format_sort": ytdlp_sort(quality),
         "outtmpl": str(dest / "%(id)s.%(ext)s"),
         "max_filesize": settings.max_file_bytes,
         "merge_output_format": "mp4" if quality != Quality.AUDIO else None,
@@ -197,6 +222,8 @@ async def ytdlp_download(
                 ErrorCode.RATE_LIMITED,
             }:
                 raise
+            if NO_FORMAT in e.detail.lower():
+                log.info("no_matching_format", url=url, rung=rung, selector=ytdlp_format(rung))
             last = e
             continue
         if files:
