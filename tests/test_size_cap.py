@@ -89,6 +89,7 @@ async def test_oversized_rung_falls_through(fake_ytdlp, settings, tmp_path: Path
 
 async def test_every_rung_too_big_is_too_large(fake_ytdlp, settings, tmp_path: Path) -> None:
     settings.max_file_mb = 0  # nothing fits
+    (tmp_path / "j").mkdir()
     with pytest.raises(ExtractError) as e:
         await ytdlp_download("https://youtu.be/x", tmp_path / "j", Quality.BEST, settings)
     assert e.value.code is ErrorCode.TOO_LARGE
