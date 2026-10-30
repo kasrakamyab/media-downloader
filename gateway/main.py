@@ -9,7 +9,6 @@ import asyncio
 from typing import Any
 
 from aiogram import Bot, Dispatcher
-from aiogram.exceptions import TelegramNetworkError
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 from arq.connections import ArqRedis, RedisSettings, create_pool
@@ -26,6 +25,7 @@ from core.settings import Settings, get_settings
 from core.telegram import make_bot
 from gateway.alerts import alert_loop
 from gateway.handlers import router
+from gateway.identity import install_identity_resolver
 from gateway.settings_handlers import settings_router
 
 log = get_logger("gateway")
@@ -60,35 +60,13 @@ async def build() -> tuple[Dispatcher, Settings, Bot]:
     )
     dp["cache"] = FileCache(arq, settings.cache_ttl_days)
     dp["groups"] = GroupRegistry(arq)
-    dp["bot_username"] = ""
-    dp["bot_can_read_all"] = False
+    # Mutable holder: polling snapshots workflow_data before the startup hooks run, so a
+    # plain dp["bot_username"] set at startup would never reach the handlers.
+    install_identity_resolver(dp, bot)
 
     @dp.startup()
     async def _start_alerts() -> None:
         dp["alerts"] = asyncio.create_task(alert_loop(bot, arq, breaker, settings))
-
-    @dp.startup()
-    async def _resolve_username() -> None:
-        # Needed to recognise "@bot <link>" in groups. Retried: the first Bot API call
-        # through a proxy has been seen to time out once and then recover.
-        for attempt in range(5):
-            try:
-                me = await bot.get_me()
-                dp["bot_username"] = me.username or ""
-                # False with BotFather privacy mode on (the default): plain group messages
-                # then reach us only in groups where the bot is an admin.
-                dp["bot_can_read_all"] = bool(me.can_read_all_group_messages)
-                log.info(
-                    "bot_identity",
-                    username=me.username,
-                    id=me.id,
-                    can_read_all_group_messages=dp["bot_can_read_all"],
-                )
-                return
-            except TelegramNetworkError as e:
-                log.warning("get_me_failed", attempt=attempt + 1, error=str(e)[:100])
-                await asyncio.sleep(2 * (attempt + 1))
-        log.error("bot_username_unknown", hint="mentions in groups won't work until restart")
 
     @dp.shutdown()
     async def _close() -> None:

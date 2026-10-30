@@ -62,10 +62,17 @@ class FakeQuery:
 
 class FakeBot:
     id = 6408937369
+    username = "Mamad_AlertsBot"
+    can_read_all = False
 
     def __init__(self, admin_in: set[int] | None = None) -> None:
         self.sent: list[tuple[int, str]] = []
         self.admin_in = admin_in or set()  # chats where the bot itself is an admin
+
+    async def get_me(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=self.id, username=self.username, can_read_all_group_messages=self.can_read_all
+        )
 
     async def send_message(self, chat_id: int, text: str, **_) -> None:
         self.sent.append((chat_id, text))
