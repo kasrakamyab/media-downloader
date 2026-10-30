@@ -1,6 +1,6 @@
 # Deploying to a VPS (step 11)
 
-One 2 vCPU / 4 GB box (Hetzner CX22 class) runs everything. Ubuntu 24.04 assumed.
+One 2 vCPU / 4 GB box (Hetzner CX22/CX23 class) runs everything. Ubuntu 24.04 assumed.
 
 ## One-time setup
 
@@ -26,12 +26,25 @@ LOG_JSON=true
 IMAGE=ghcr.io/kasrakamyab/media-bot:latest
 ```
 
-Then, if the GHCR package is private, `docker login ghcr.io` once, and:
+**No domain?** Use [sslip.io](https://sslip.io): for a server at 188.245.13.109 set
+`DOMAIN=188-245-13-109.sslip.io` and `WEBHOOK_URL=https://188-245-13-109.sslip.io/webhook`.
+It resolves to the IP with no setup and Caddy gets a Let's Encrypt certificate for it like
+for any other name. (Polling mode works too and needs no domain at all; webhook mode just
+reacts faster and avoids one long-poll connection.)
+
+**Cookies:** `./secrets` is read inside the containers by the `bot` user (uid 1000). Make the
+folder and files readable by it — `sudo chown -R 1000:1000 secrets && chmod 700 secrets &&
+chmod 600 secrets/*` — or the workers log `cookies_file_missing` / permission errors.
+
+The image is pulled from the GitHub Container Registry. **Make the package public once**
+(github.com → your profile → Packages → `media-bot` → Package settings → Change visibility →
+Public); after that neither the server nor the deploy workflow needs `docker login`. For a
+private package, `docker login ghcr.io` on the server with a token that has `read:packages`.
 
 ```bash
 docker compose -f docker-compose.yml -f deploy/compose.prod.yml pull
 docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d
-curl -s https://bot.example.com/health
+curl -s https://$DOMAIN/health          # through Caddy; the gateway port isn't published
 ```
 
 Caddy gets the certificate on first start. Send the bot a link.
@@ -41,8 +54,14 @@ Caddy gets the certificate on first start. Send the bot a link.
 `.github/workflows/deploy.yml` builds the image, runs the tests, pushes
 `ghcr.io/<owner>/media-bot:<timestamp>-<sha>` and `:latest`, then ssh-es in and runs
 `compose pull && up -d`. Add these repository secrets: `DEPLOY_HOST`, `DEPLOY_USER`,
-`DEPLOY_SSH_KEY`, `DEPLOY_PATH` (`/opt/media-bot`). A push to `main` is live in about
-2–3 minutes. The same workflow runs every Monday so yt-dlp and gallery-dl stay current.
+`DEPLOY_SSH_KEY`, `DEPLOY_PATH` (`/opt/media-bot`). Without `DEPLOY_HOST` the workflow only
+builds and pushes the image. A push to `main` is live in about 2–3 minutes; the workflow
+checks the gateway's `/health` from inside its container (in prod the port isn't published
+on the host) and prints the gateway log if that fails. The same workflow runs every Monday
+so yt-dlp and gallery-dl stay current.
+
+The server checkout is reset to `origin/main` on every deploy; untracked files such as a
+local `compose.server.yml` survive that, tracked files you edited on the box do not.
 
 Rollback is one command — pin the previous tag and re-up:
 
