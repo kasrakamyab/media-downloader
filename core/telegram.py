@@ -20,6 +20,7 @@ from aiogram.types import (
     InputMediaPhoto,
     InputMediaVideo,
     Message,
+    ReactionTypeEmoji,
     ReplyParameters,
 )
 
@@ -87,6 +88,23 @@ class Sender(Protocol):
     ) -> None: ...
 
     async def finish(self, chat_id: int, message_id: int, text: str | None) -> None: ...
+
+    async def react(self, chat_id: int, message_id: int, emoji: str | None) -> bool: ...
+
+    async def say(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> None: ...
+
+
+# Reactions used for progress. All three are in Telegram's always-available emoji list.
+REACT_WORKING = "👀"
+REACT_DONE = "👍"
+REACT_FAILED = "👎"
 
 
 class DeliveryError(Exception):
@@ -276,6 +294,30 @@ class TelegramSender:
         except TelegramBadRequest:
             pass  # message already gone or unchanged; not worth failing the job
 
+    async def react(self, chat_id: int, message_id: int, emoji: str | None) -> bool:
+        """Set (or with None clear) our reaction on a message. False when the chat doesn't
+        allow it: reactions disabled, no rights, message gone — never worth failing a job."""
+        reaction = [ReactionTypeEmoji(emoji=emoji)] if emoji else []
+        try:
+            await self.bot.set_message_reaction(chat_id, message_id, reaction=reaction)
+            return True
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            log.info("reaction_unavailable", chat_id=chat_id, error=str(e)[:100])
+            return False
+
+    async def say(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> None:
+        try:
+            await self.bot.send_message(chat_id, text, **_reply_kwargs(reply_to, thread_id))
+        except (TelegramBadRequest, TelegramForbiddenError) as e:
+            log.info("say_failed", chat_id=chat_id, error=str(e)[:100])
+
 
 class FakeSender:
     """Records calls; used by tests."""
@@ -285,6 +327,9 @@ class FakeSender:
         self.sent_cached: list[tuple[int, list[str], str | None]] = []
         self.finished: list[tuple[int, int, str | None]] = []
         self.targets: list[tuple[int | None, int | None]] = []  # (reply_to, thread_id) per send
+        self.reactions: list[tuple[int, int, str | None]] = []
+        self.said: list[tuple[int, str, int | None, int | None]] = []
+        self.reactions_work = True
         self._counter = 0
 
     async def send_files(
@@ -318,3 +363,17 @@ class FakeSender:
 
     async def finish(self, chat_id: int, message_id: int, text: str | None) -> None:
         self.finished.append((chat_id, message_id, text))
+
+    async def react(self, chat_id: int, message_id: int, emoji: str | None) -> bool:
+        self.reactions.append((chat_id, message_id, emoji))
+        return self.reactions_work
+
+    async def say(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_to: int | None = None,
+        thread_id: int | None = None,
+    ) -> None:
+        self.said.append((chat_id, text, reply_to, thread_id))

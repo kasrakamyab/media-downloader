@@ -23,6 +23,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ReactionTypeEmoji,
 )
 from arq.connections import ArqRedis
 from pydantic import BaseModel
@@ -46,6 +47,7 @@ from core.limits import UserLimits
 from core.logging import get_logger
 from core.settings import Settings
 from gateway.identity import BotIdentity
+from core.telegram import REACT_WORKING
 
 log = get_logger("gateway")
 router = Router()
@@ -393,6 +395,7 @@ async def on_text(
     bot_username: str = "",
     groups: GroupRegistry | None = None,
     identity: BotIdentity | None = None,
+    bot: Bot | None = None,
 ) -> None:
     if not message.from_user:
         return
@@ -484,8 +487,15 @@ async def on_text(
         )
         return
 
+    # Progress: a 👀 reaction on the user's message (nothing to delete later), or, where
+    # reactions aren't allowed, the classic "Working on it…" reply. Auto mode posts nothing
+    # until the media itself, but may still react.
     placeholder = None
-    if ask.explicit:  # auto mode posts nothing until the media itself
+    react_id = None
+    if settings.use_reactions and bot is not None:
+        if await _react(bot, message.chat.id, ask.source.message_id, REACT_WORKING):
+            react_id = ask.source.message_id
+    if react_id is None and ask.explicit:
         placeholder = await say(ask.source, WORKING, reply=True)  # attached to the link
         if placeholder is None:  # can't even post text here: nothing more we can do
             await limits.release(message.from_user.id, chat_scope)
@@ -494,6 +504,7 @@ async def on_text(
         chat_id=message.chat.id,
         user_id=message.from_user.id,
         message_id=placeholder.message_id if placeholder else 0,
+        react_message_id=react_id,
         quiet=not ask.explicit,
         url=found.url,
         platform=found.platform,
@@ -506,7 +517,7 @@ async def on_text(
     # The menu is for people who asked. A cached answer for the default quality skips it
     # too: the worker serves that instantly.
     if (
-        placeholder is not None
+        ask.explicit
         and found.platform in PROBE_PLATFORMS
         and quality in (Quality.BEST, gs.max_quality)
         and not await cache.get(found.url, quality)
@@ -516,11 +527,41 @@ async def on_text(
             for f in await _quality_menu(arq, found.url, settings)
             if within_cap(f.quality, gs.max_quality)
         ]
-        if len(offered) >= 2:
-            await _offer_choice(arq, placeholder, job, offered, settings)
+        if len(offered) >= 2 and await _offer_choice(
+            arq, ask.source, placeholder, job, offered, settings
+        ):
             return
 
     await _enqueue(arq, limits, job, settings, placeholder)
+
+
+async def _react(bot: Bot, chat_id: int, message_id: int, emoji: str) -> bool:
+    """Set our reaction on a message; False where the chat doesn't allow it (reactions off,
+    no rights, old group) so the caller can fall back to a message."""
+    try:
+        await bot.set_message_reaction(
+            chat_id, message_id, reaction=[ReactionTypeEmoji(emoji=emoji)]
+        )
+        return True
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        log.info("reaction_unavailable", chat_id=chat_id, error=str(e)[:100])
+        return False
+
+
+async def _dismiss_menu(menu: Message | None, job: Job) -> None:
+    """After a choice: with a reaction in play the menu is just noise, delete it; otherwise
+    the menu message doubles as the placeholder and turns into "Working on it…"."""
+    if menu is None:
+        return
+    if job.react_message_id:
+        try:
+            await menu.delete()
+            job.message_id = 0
+            return
+        except (TelegramBadRequest, TelegramForbiddenError):
+            pass  # can't delete: keep it as the placeholder instead
+    with contextlib.suppress(TelegramBadRequest, TelegramForbiddenError):
+        await menu.edit_text(WORKING)
 
 
 async def _quality_menu(arq: ArqRedis, url: str, settings: Settings) -> list[FormatOption]:
@@ -563,30 +604,47 @@ def quality_keyboard(job_id: str, offered: list[FormatOption]) -> InlineKeyboard
 
 
 async def _offer_choice(
-    arq: ArqRedis, placeholder: Message, job: Job, offered: list[FormatOption], settings: Settings
-) -> None:
+    arq: ArqRedis,
+    source: Message,
+    placeholder: Message | None,
+    job: Job,
+    offered: list[FormatOption],
+    settings: Settings,
+) -> bool:
+    """Show the quality menu: by editing the placeholder, or as a new reply when progress
+    is a reaction. Returns False when the menu couldn't be posted (caller enqueues)."""
+    text = (
+        f"Pick a quality (I'll go with {offered[0].label} in {settings.quality_choice_timeout}s):"
+    )
+    markup = quality_keyboard(job.job_id, offered)
+    try:
+        if placeholder is not None:
+            await placeholder.edit_text(text, reply_markup=markup)
+            menu = placeholder
+        else:
+            menu = await source.reply(text, reply_markup=markup)
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        log.info("menu_failed", job_id=job.job_id, error=str(e)[:100])
+        return False
+    job.message_id = menu.message_id  # the worker edits/deletes it if nobody chooses
     default = offered[0].quality  # best rung under the cap comes first
     pending = PendingChoice(job=job, default=default, offered=[f.quality for f in offered])
     await arq.set(
         pending_key(job.job_id), pending.model_dump_json(), ex=settings.quality_choice_timeout + 30
     )
-    await placeholder.edit_text(
-        f"Pick a quality (I'll go with {offered[0].label} in {settings.quality_choice_timeout}s):",
-        reply_markup=quality_keyboard(job.job_id, offered),
-    )
-    asyncio.create_task(_choose_default_later(arq, placeholder, job.job_id, settings))
+    asyncio.create_task(_choose_default_later(arq, menu, job.job_id, settings))
+    return True
 
 
 async def _choose_default_later(
-    arq: ArqRedis, placeholder: Message, job_id: str, settings: Settings
+    arq: ArqRedis, menu: Message, job_id: str, settings: Settings
 ) -> None:
     await asyncio.sleep(settings.quality_choice_timeout)
     pending = await _take_pending(arq, job_id)
     if pending is None:
         return  # the user already chose
     pending.job.quality = pending.default
-    with contextlib.suppress(TelegramBadRequest):
-        await placeholder.edit_text(WORKING)
+    await _dismiss_menu(menu, pending.job)
     await _enqueue_pending(arq, pending.job, settings)
 
 
@@ -617,9 +675,9 @@ async def on_quality_chosen(
         return
     pending.job.quality = quality if quality in pending.offered else pending.default
     await query.answer()
-    if isinstance(query.message, Message):
-        with contextlib.suppress(TelegramBadRequest):
-            await query.message.edit_text(WORKING)
+    # InaccessibleMessage (too old / no access) has no edit_text: nothing to dismiss then.
+    menu = query.message if hasattr(query.message, "edit_text") else None
+    await _dismiss_menu(menu, pending.job)
     await _enqueue_pending(arq, pending.job, settings)
 
 

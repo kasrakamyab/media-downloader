@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     quality_choice_timeout: int = Field(default=60, alias="QUALITY_CHOICE_TIMEOUT")
     # Auto-download in groups: the same link posted again within this window is skipped.
     auto_dedupe_seconds: int = Field(default=120, alias="AUTO_DEDUPE_SECONDS")
+    # Show progress as a reaction on the user's message (👀 -> 👍 / 👎) instead of a
+    # "Working on it…" message; falls back to the message where reactions aren't allowed.
+    use_reactions: bool = Field(default=True, alias="USE_REACTIONS")
     probe_cache_ttl: int = Field(default=600, alias="PROBE_CACHE_TTL")
     alert_after_open_s: int = Field(default=1800, alias="ALERT_AFTER_OPEN_S")
 
