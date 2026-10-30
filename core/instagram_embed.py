@@ -25,6 +25,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 import aiohttp
 
+from core.captions import from_og
 from core.contracts import ErrorCode
 from core.logging import get_logger
 from core.settings import Settings
@@ -310,9 +311,10 @@ async def og_download(post_url: str, dest: Path, settings: Settings) -> Extracte
         log.info("og_first_item_only", url=post_url, hint="carousel; rest needs a session")
     await asyncio.to_thread(dest.mkdir, parents=True, exist_ok=True)
     files = await download_items(items, dest, settings)
+    meta = from_og(og_tags(page), post_page_url(post_url))
     cropped, stp = crop_info(items[0].url)
     if not cropped and not carousel:
-        return Extracted(files)
+        return Extracted(files, meta=meta)
     if cropped:
         log.info("og_preview_cropped", url=post_url, stp=stp, bytes=files[0].stat().st_size)
     return Extracted(
@@ -320,6 +322,7 @@ async def og_download(post_url: str, dest: Path, settings: Settings) -> Extracte
         caption=preview_caption(stp, carousel),
         cacheable=False,
         needs_login=f"served a logged-out preview (stp={stp or 'n/a'}, carousel={carousel})",
+        meta=meta,
     )
 
 

@@ -132,6 +132,15 @@ def is_rights_error(e: Exception) -> bool:
     return isinstance(e, TelegramForbiddenError) or bool(_RIGHTS_RE.search(str(e)))
 
 
+_CAPTION_RE = re.compile(
+    r"caption|can't parse entities|CAPTION_TOO_LONG|MEDIA_CAPTION", re.IGNORECASE
+)
+
+
+def is_caption_error(e: Exception) -> bool:
+    return bool(_CAPTION_RE.search(str(e)))
+
+
 def _reply_kwargs(reply_to: int | None, thread_id: int | None) -> dict:
     kw: dict = {}
     if reply_to:
@@ -185,14 +194,29 @@ class TelegramSender:
         total = sum(sizes)
         where = _reply_kwargs(reply_to, thread_id)
         started = time.monotonic()
-        try:
+
+        async def attempt(cap: str | None) -> list[str]:
             if len(files) > 1 and all(k in {"photo", "video"} for k in kinds):
-                ids = await self._send_group(chat_id, files, kinds, caption, total, where)
-            else:
-                ids = []
-                for i, (f, k, size) in enumerate(zip(files, kinds, sizes, strict=True)):
-                    cap = caption if i == 0 else None
-                    ids.append(_file_id(await self._send_one(chat_id, f, k, cap, size, where)))
+                return await self._send_group(chat_id, files, kinds, cap, total, where)
+            ids = []
+            for i, (f, k, size) in enumerate(zip(files, kinds, sizes, strict=True)):
+                ids.append(
+                    _file_id(
+                        await self._send_one(chat_id, f, k, cap if i == 0 else None, size, where)
+                    )
+                )
+            return ids
+
+        try:
+            try:
+                ids = await attempt(caption)
+            except TelegramBadRequest as e:
+                if caption is None or not is_caption_error(e):
+                    raise
+                # The media is fine, the caption isn't (too long after parsing, bad entity):
+                # the file matters more than the text.
+                log.warning("caption_rejected", chat_id=chat_id, error=str(e)[:120])
+                ids = await attempt(None)
         except (TelegramNetworkError, TimeoutError) as e:
             took = time.monotonic() - started
             raise DeliveryError(f"{e.__class__.__name__}: {e} after {took:.0f}s, {total} B") from e
@@ -257,8 +281,8 @@ class TelegramSender:
                     chat_id, inp, caption=caption, request_timeout=timeout, **where
                 )
         except TelegramBadRequest as e:
-            if is_rights_error(e):
-                raise
+            if is_rights_error(e) or is_caption_error(e):
+                raise  # not the media's fault: the caller decides (caption retry)
             # e.g. unsupported codec / dimensions -> fall through to document
         return await self.bot.send_document(
             chat_id, inp, caption=caption, request_timeout=timeout, **where
@@ -277,9 +301,14 @@ class TelegramSender:
         where = _reply_kwargs(reply_to, thread_id)
         try:
             for i, fid in enumerate(file_ids[:MEDIA_GROUP_MAX]):
-                await self.bot.send_document(
-                    chat_id, fid, caption=caption if i == 0 else None, **where
-                )
+                cap = caption if i == 0 else None
+                try:
+                    await self.bot.send_document(chat_id, fid, caption=cap, **where)
+                except TelegramBadRequest as e:
+                    if cap is None or not is_caption_error(e):
+                        raise
+                    log.warning("caption_rejected", chat_id=chat_id, error=str(e)[:120])
+                    await self.bot.send_document(chat_id, fid, caption=None, **where)
         except (TelegramForbiddenError, TelegramBadRequest) as e:
             if is_rights_error(e):
                 raise ForbiddenError(str(e)) from e

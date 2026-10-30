@@ -61,6 +61,7 @@ turned away by a group limit can still download in a private chat.
 | Auto-download | **on** | Every supported link posted in the group is fetched without `/dl`: no "working" message, no quality menu (the max quality, or the best under the size cap), and failures are only logged, never posted. It only takes effect where Telegram delivers plain messages to the bot — **admin** or privacy mode **off** — which is why the greeting asks for admin. Messages from other bots are ignored, and the same link posted again within `AUTO_DEDUPE_SECONDS` (120 s) is downloaded once. Turn it off here if a group prefers `/dl` only. |
 | Max quality | best | Caps YouTube: `/dl` menus only show rungs up to the cap, auto mode downloads at the cap. `audio` always allowed. |
 | Platforms | all | Links from a disabled platform are refused with a short reply (`/dl`) or ignored (auto). |
+| Captions | on | Title (linked to the source), date · duration · views · likes · comments · channel, format and size, and the description in an expandable quote. `CAPTIONS=full\|short\|off` in `.env` sets the style for the whole bot; this toggle switches captions off for one group. |
 
 Taps on the keyboard are re-checked against the group's admin list and the chat the keyboard
 belongs to, so forwarding a settings message elsewhere does nothing. Anonymous admins

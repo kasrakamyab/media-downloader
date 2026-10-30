@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     quality_choice_timeout: int = Field(default=60, alias="QUALITY_CHOICE_TIMEOUT")
     # Auto-download in groups: the same link posted again within this window is skipped.
     auto_dedupe_seconds: int = Field(default=120, alias="AUTO_DEDUPE_SECONDS")
+    # Caption under delivered media: full (title, stats, description), short (title + link),
+    # off. Groups can switch captions off in /settings.
+    captions: Literal["full", "short", "off"] = Field(default="full", alias="CAPTIONS")
     # Show progress as a reaction on the user's message (👀 -> 👍 / 👎) instead of a
     # "Working on it…" message; falls back to the message where reactions aren't allowed.
     use_reactions: bool = Field(default=True, alias="USE_REACTIONS")

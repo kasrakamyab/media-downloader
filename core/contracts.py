@@ -99,6 +99,7 @@ class Job(BaseModel):
     user_id: int
     message_id: int  # the "Working on it…" placeholder the worker edits when done; 0 = none
     quiet: bool = False  # auto mode in groups: no placeholder, failures are only logged
+    captions: str = "full"  # full | short | off — decided by the gateway per chat
     # The user's own message when progress is shown as a reaction on it (👀 -> 👍 / 👎)
     # instead of a placeholder message; None when reactions aren't available there.
     react_message_id: int | None = None

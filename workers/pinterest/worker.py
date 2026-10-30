@@ -44,7 +44,9 @@ async def extract(job: Job, dest: Path, settings: Settings) -> list[Path]:
     url = await resolve_short_link(job.url, settings.extract_timeout, settings.download_proxy)
     cookies = settings.pin_cookies_file
     try:
-        return await gallerydl_download(url, dest, settings, cookies, max_items=BOARD_MAX_ITEMS)
+        return await gallerydl_download(
+            url, dest, settings, cookies, max_items=BOARD_MAX_ITEMS, platform="pinterest"
+        )
     except ExtractError as e:
         if e.code in {ErrorCode.PRIVATE, ErrorCode.RATE_LIMITED}:
             raise

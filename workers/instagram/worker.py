@@ -21,7 +21,9 @@ _FINAL = {ErrorCode.PRIVATE, ErrorCode.RATE_LIMITED}
 
 
 async def _gallerydl(job: Job, dest: Path, settings: Settings, cookies: str | None) -> list[Path]:
-    return await gallerydl_download(job.url, dest, settings, cookies, max_items=10)
+    return await gallerydl_download(
+        job.url, dest, settings, cookies, max_items=10, platform="instagram"
+    )
 
 
 async def _ytdlp(job: Job, dest: Path, settings: Settings, cookies: str | None) -> list[Path]:

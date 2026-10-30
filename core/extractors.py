@@ -7,6 +7,7 @@ Both run off the event loop (thread / subprocess) and translate tool failures in
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -15,9 +16,23 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from core.captions import MediaMeta, from_gallerydl, from_ytdlp
 from core.contracts import ErrorCode, FormatOption, Quality
 from core.settings import Settings
-from core.worker import ExtractError, collect_files
+from core.worker import Extracted, ExtractError, collect_files
+
+
+def gallerydl_meta(dest: Path, files: list[Path], platform: str, url: str) -> MediaMeta | None:
+    """Read the `--write-metadata` sidecar of the first file, if gallery-dl produced one."""
+    for candidate in (Path(str(files[0]) + ".json"), *sorted(dest.glob("*.json"))):
+        if candidate.is_file():
+            try:
+                data = json.loads(candidate.read_text(errors="replace"))
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                return from_gallerydl(data, platform, url)
+    return None
 
 
 @contextmanager
@@ -132,7 +147,8 @@ def ytdlp_common_opts(settings: Settings, cookies: str | None) -> dict:
 
 def _ytdlp_once(
     url: str, dest: Path, quality: Quality, settings: Settings, cookies: str | None
-) -> list[Path]:
+) -> tuple[list[Path], dict]:
+    """Download one rung; returns the files and yt-dlp's info dict (for the caption)."""
     import yt_dlp  # imported lazily: heavy, and tests don't need it
 
     opts: dict = ytdlp_common_opts(settings, cookies) | {
@@ -145,29 +161,34 @@ def _ytdlp_once(
     }
     if settings.rate_limit:
         opts["ratelimit"] = yt_dlp.utils.parse_bytes(settings.rate_limit)
+    info: dict = {}
     try:
         with cookie_copy(cookies, dest) as jar:
             if jar:
                 opts["cookiefile"] = jar
             with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+                raw = ydl.extract_info(url, download=True)
+                info = ydl.sanitize_info(raw) if raw else {}
     except yt_dlp.utils.DownloadError as e:
         raise ExtractError(classify(str(e)), str(e)) from e
     except OSError as e:
         # Disk full, permissions, a mount gone read-only: a configuration problem, not
         # something a retry on the next rung would change.
         raise ExtractError(ErrorCode.UNKNOWN, f"filesystem error: {e}") from e
-    return collect_files(dest)
+    if info.get("_type") == "playlist":  # playlist_items=1: the one entry we fetched
+        entries = info.get("entries") or []
+        info = entries[0] if entries and isinstance(entries[0], dict) else {}
+    return collect_files(dest), info or {}
 
 
 async def ytdlp_download(
     url: str, dest: Path, quality: Quality, settings: Settings, cookies: str | None = None
-) -> list[Path]:
+) -> Extracted:
     """Walk the quality ladder until something under the size cap downloads."""
     last: ExtractError | None = None
     for rung in ladder_for(quality):
         try:
-            files = await asyncio.to_thread(_ytdlp_once, url, dest, rung, settings, cookies)
+            files, info = await asyncio.to_thread(_ytdlp_once, url, dest, rung, settings, cookies)
         except ExtractError as e:
             if e.code in {
                 ErrorCode.PRIVATE,
@@ -179,7 +200,8 @@ async def ytdlp_download(
             last = e
             continue
         if files:
-            return files
+            size = sum(f.stat().st_size for f in files)
+            return Extracted(files, meta=from_ytdlp(info, size) if info else None)
         # yt-dlp silently skips files over max_filesize: try the next rung.
         last = ExtractError(ErrorCode.TOO_LARGE, f"{rung} over size cap")
     raise last or ExtractError(ErrorCode.UNKNOWN, "ladder exhausted")
@@ -285,7 +307,8 @@ async def gallerydl_download(
     settings: Settings,
     cookies: str | None = None,
     max_items: int = 10,
-) -> list[Path]:
+    platform: str = "",
+) -> Extracted:
     cmd = [
         "gallery-dl",
         "--quiet",
@@ -300,6 +323,7 @@ async def gallerydl_download(
         "--retries",
         "1",
         "--no-part",
+        "--write-metadata",  # <file>.json next to each file: caption source
     ]
     if settings.rate_limit:
         cmd += ["--limit-rate", settings.rate_limit]
@@ -321,10 +345,8 @@ async def gallerydl_download(
             raise ExtractError(ErrorCode.SOURCE_DOWN, "gallery-dl timeout") from None
     stderr = err.decode(errors="replace")
     files = collect_files(dest)
-    if proc.returncode == 0 and files:
-        return files
-    if files:  # partial success (e.g. one item over the cap) is still a success
-        return files
+    if files:  # exit 0, or partial success (e.g. one item over the cap): still a success
+        return Extracted(files, meta=gallerydl_meta(dest, files, platform, url))
     code = _GDL_EXIT.get(proc.returncode or 1, ErrorCode.UNKNOWN)
     if proc.returncode in (1, 4):
         code = classify(stderr) if stderr.strip() else code

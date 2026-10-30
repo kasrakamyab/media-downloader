@@ -506,6 +506,7 @@ async def on_text(
         message_id=placeholder.message_id if placeholder else 0,
         react_message_id=react_id,
         quiet=not ask.explicit,
+        captions=settings.captions if (not group or gs.captions) else "off",
         url=found.url,
         platform=found.platform,
         quality=quality,

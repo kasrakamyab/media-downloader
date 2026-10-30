@@ -314,7 +314,7 @@ async def test_worker_falls_through_to_og_page_without_cookies(monkeypatch, sett
         calls.append("ytdlp")
         raise ExtractError(ErrorCode.UNKNOWN, "There is no video in this post")
 
-    async def gallerydl(url, dest, settings, cookies=None, max_items=10):
+    async def gallerydl(url, dest, settings, cookies=None, max_items=10, **_):
         calls.append("gallerydl")
         raise ExtractError(ErrorCode.LOGIN_REQUIRED, "HTTP redirect to login page")
 
@@ -371,7 +371,7 @@ async def test_worker_embed_is_the_last_try(monkeypatch, settings, tmp_path):
 async def test_worker_order_with_cookies_and_error_precedence(monkeypatch, settings, tmp_path):
     calls: list[str] = []
 
-    async def gallerydl(url, dest, settings, cookies=None, max_items=10):
+    async def gallerydl(url, dest, settings, cookies=None, max_items=10, **_):
         calls.append("gallerydl")
         raise ExtractError(ErrorCode.UNKNOWN, "weird")
 
