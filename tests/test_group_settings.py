@@ -199,7 +199,7 @@ async def _queued(arq: ArqRedis, platform: Platform) -> list[Job]:
     for jid in ids:
         raw = await arq.get(f"arq:job:{jid.decode()}")
         out.append(Job.model_validate(deserialize_job(raw).args[0]))
-    return out
+    return sorted(out, key=lambda j: j.requested_at)  # the queue zset has no stable order
 
 
 def test_extract_ask_auto_mode() -> None:

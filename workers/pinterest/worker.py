@@ -44,11 +44,20 @@ async def extract(job: Job, dest: Path, settings: Settings) -> list[Path]:
     url = await resolve_short_link(job.url, settings.extract_timeout, settings.download_proxy)
     cookies = settings.pin_cookies_file
     try:
-        return await gallerydl_download(url, dest, settings, cookies, max_items=BOARD_MAX_ITEMS)
+        return await gallerydl_download(
+            url, dest, settings, cookies, max_items=BOARD_MAX_ITEMS, platform="pinterest"
+        )
     except ExtractError as e:
         if e.code in {ErrorCode.PRIVATE, ErrorCode.RATE_LIMITED}:
             raise
-        log.info("gallerydl_failed_trying_ytdlp", job_id=job.job_id, code=e.code)
+        # gallery-dl hands HLS video pins to its ytdl module ("ytdl:https://…m3u8"); when
+        # that fails the detail says so, and yt-dlp gets the pin URL itself next.
+        log.info(
+            "gallerydl_failed_trying_ytdlp",
+            job_id=job.job_id,
+            code=e.code,
+            detail=(e.detail or "")[-300:],
+        )
         try:
             return await ytdlp_download(url, dest, Quality.BEST, settings, cookies)
         except ExtractError as e2:

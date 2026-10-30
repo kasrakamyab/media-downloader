@@ -57,6 +57,7 @@ class GroupSettings(BaseModel):
     auto: bool = True
     max_quality: Quality = Quality.BEST
     platforms: list[Platform] = Field(default_factory=lambda: list(Platform))
+    captions: bool = True  # caption under delivered media (title, stats, description)
 
     def allows(self, platform: Platform) -> bool:
         return platform in self.platforms
@@ -66,6 +67,7 @@ class GroupSettings(BaseModel):
             "auto": "1" if self.auto else "0",
             "max_quality": self.max_quality.value,
             "platforms": ",".join(p.value for p in self.platforms),
+            "captions": "1" if self.captions else "0",
         }
 
     @classmethod
@@ -78,6 +80,8 @@ class GroupSettings(BaseModel):
                 data["max_quality"] = Quality(raw["max_quality"])
             except ValueError:
                 pass
+        if "captions" in raw:
+            data["captions"] = raw["captions"] != "0"
         if "platforms" in raw:
             data["platforms"] = [
                 Platform(p)

@@ -22,6 +22,7 @@ from redis.asyncio import Redis
 
 from core.breaker import Breaker
 from core.cache import FileCache
+from core.captions import MediaMeta, build_caption
 from core.contracts import (
     ERROR_MESSAGES,
     JOB_FUNCTION,
@@ -40,7 +41,15 @@ from core.healthserver import start_health_server
 from core.limits import UserLimits
 from core.logging import configure_logging, get_logger
 from core.settings import Settings, get_settings
-from core.telegram import DeliveryError, ForbiddenError, Sender, TelegramSender, make_bot
+from core.telegram import (
+    REACT_DONE,
+    REACT_FAILED,
+    DeliveryError,
+    ForbiddenError,
+    Sender,
+    TelegramSender,
+    make_bot,
+)
 
 log = get_logger("worker")
 
@@ -53,8 +62,9 @@ class Extracted:
     would have done better."""
 
     files: list[Path]
-    caption: str | None = None
+    caption: str | None = None  # a note shown first (e.g. "Preview only…"), plain text
     cacheable: bool = True
+    meta: MediaMeta | None = None  # source metadata: the caption is built from it
     needs_login: str | None = None  # detail for the 🔑 alert, when a session was missing
 
 
@@ -123,20 +133,20 @@ async def run_job(
         if await cache.is_blocked(job.url):
             raise ExtractError(ErrorCode.UNSUPPORTED_URL, "blocked")
 
-        cached = await cache.get(job.url, job.quality)
-        if cached:
+        entry = await cache.get_entry(job.url, job.quality)
+        if entry:
             try:
                 await sender.send_cached(
                     job.chat_id,
-                    cached,
-                    None,
+                    entry.file_ids,
+                    build_caption(entry.meta, job.captions, note=entry.note),
                     reply_to=job.reply_to_message_id,
                     thread_id=job.thread_id,
                 )
             except ForbiddenError as e:
                 raise ExtractError(ErrorCode.FORBIDDEN, str(e)) from e
             await _finish_ok(sender, job)
-            result = Result.ok(job.job_id, cached, _ms(started), cached=True)
+            result = Result.ok(job.job_id, entry.file_ids, _ms(started), cached=True)
             log_.info("served_from_cache", took_ms=result.took_ms)
             return result
 
@@ -153,11 +163,14 @@ async def run_job(
         if too_big:
             raise ExtractError(ErrorCode.TOO_LARGE, too_big[0].name)
 
+        if extracted.meta is not None and extracted.meta.filesize is None:
+            extracted.meta.filesize = sum(f.stat().st_size for f in files)
+        caption = build_caption(extracted.meta, job.captions, note=extracted.caption)
         try:
             file_ids = await sender.send_files(
                 job.chat_id,
                 files,
-                extracted.caption,
+                caption,
                 reply_to=job.reply_to_message_id,
                 thread_id=job.thread_id,
             )
@@ -166,7 +179,7 @@ async def run_job(
         except DeliveryError as e:
             raise ExtractError(ErrorCode.UPLOAD_FAILED, str(e)) from e
         if extracted.cacheable:
-            await cache.set(job.url, job.quality, file_ids)
+            await cache.set(job.url, job.quality, file_ids, extracted.meta, extracted.caption)
         if extracted.needs_login:
             await flag_login_required(redis, job.platform, extracted.needs_login)
         await _finish_ok(sender, job)
@@ -260,17 +273,30 @@ async def run_probe(url: str, *, prober: Prober, settings: Settings) -> ProbeRes
 
 
 async def _finish_ok(sender: Sender, job: Job) -> None:
-    if job.message_id:  # 0 = no placeholder (auto mode in groups)
+    if job.react_message_id:  # progress shown as a reaction on the user's message
+        await sender.react(job.chat_id, job.react_message_id, REACT_DONE)
+    if job.message_id:  # 0 = no placeholder (reactions, or auto mode in groups)
         await sender.finish(job.chat_id, job.message_id, None)
 
 
 async def _safe_finish(sender: Sender, job: Job, text: str) -> None:
-    """Tell the user why it failed — unless the job is quiet (auto mode), where a failure
-    is only logged so the bot never adds noise to a group it wasn't asked in."""
-    if job.quiet or not job.message_id:
-        return
+    """Tell the user why it failed: 👎 on their message when reactions are in use, plus the
+    one-line reason — unless the job is quiet (auto mode), where the reason is only logged
+    so the bot never adds noise to a group it wasn't asked in."""
     try:
-        await sender.finish(job.chat_id, job.message_id, f"❌ {text}")
+        if job.react_message_id:
+            await sender.react(job.chat_id, job.react_message_id, REACT_FAILED)
+        if job.quiet:
+            return
+        if job.message_id:
+            await sender.finish(job.chat_id, job.message_id, f"❌ {text}")
+        elif job.react_message_id:
+            await sender.say(
+                job.chat_id,
+                f"❌ {text}",
+                reply_to=job.react_message_id,
+                thread_id=job.thread_id,
+            )
     except Exception:
         log.exception("finish_failed", job_id=job.job_id)
 

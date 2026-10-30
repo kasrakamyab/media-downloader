@@ -76,6 +76,7 @@ async def test_unresolved_identity_falls_back_to_kwargs(arq, deps) -> None:
     for jid in await arq.zrange(QUEUE_NAMES[Platform.YOUTUBE], 0, -1):
         raw = await arq.get(f"arq:job:{jid.decode()}")
         jobs.append(Job.model_validate(deserialize_job(raw).args[0]))
+    jobs.sort(key=lambda j: j.requested_at)  # the queue zset has no stable order
     assert [j.quiet for j in jobs] == [False, True]
 
 

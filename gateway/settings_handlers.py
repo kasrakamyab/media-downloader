@@ -55,7 +55,9 @@ def render(title: str, s: GroupSettings) -> str:
         f"shows me those messages if the bot is an admin or privacy mode is off "
         f"(BotFather /setprivacy).\n"
         f"Max quality: <b>{quality}</b>\n"
-        f"Platforms: <b>{platforms}</b>\n\n"
+        f"Platforms: <b>{platforms}</b>\n"
+        f"Captions: <b>{'on' if s.captions else 'off'}</b> — title, stats and description "
+        f"under each download.\n\n"
         f"Tap to change. Admins only."
     )
 
@@ -79,6 +81,11 @@ def keyboard(chat_id: int, s: GroupSettings) -> InlineKeyboardMarkup:
             )
             for p in Platform
         ],
+        [
+            InlineKeyboardButton(
+                text=f"Captions: {'ON' if s.captions else 'OFF'}", callback_data=cb("captions")
+            )
+        ],
         [InlineKeyboardButton(text="Done", callback_data=cb("close"))],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -88,6 +95,8 @@ def apply(s: GroupSettings, action: str, value: str) -> GroupSettings:
     """Pure state transition for one tap; unknown actions leave the settings alone."""
     if action == "auto":
         return s.model_copy(update={"auto": not s.auto})
+    if action == "captions":
+        return s.model_copy(update={"captions": not s.captions})
     if action == "maxq":
         i = MAX_QUALITY_CYCLE.index(s.max_quality) if s.max_quality in MAX_QUALITY_CYCLE else 0
         return s.model_copy(

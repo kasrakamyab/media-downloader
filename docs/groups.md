@@ -31,8 +31,13 @@ With privacy mode on (recommended), these work:
 way; the docs just can't promise Telegram delivers it.
 
 The bot replies to the message that carried the link, inside its forum topic if the group
-uses topics. The "⏳ Working on it…" placeholder is deleted on success and edited to a short
-reason on failure, so the bot never piles up messages. The quality menu for YouTube can only
+uses topics. Progress is shown as a **reaction on that message**: 👀 while working, 👍 when
+the media has been sent, 👎 when it failed (with a one-line reason as a reply, except in auto
+mode). Nothing is posted that would later need deleting. Where reactions aren't allowed
+(disabled in the group, no rights) the bot falls back to a "⏳ Working on it…" reply that is
+deleted on success and edited to the reason on failure. `USE_REACTIONS=false` forces the
+message style everywhere. The YouTube quality menu is still a message, since it needs
+buttons; it disappears once a quality is chosen. The quality menu for YouTube can only
 be used by the person who asked; everyone else gets "Only the person who asked can choose".
 
 Per-user limits (2 at a time, 20/hour) apply inside groups exactly as in private chats.
@@ -56,6 +61,7 @@ turned away by a group limit can still download in a private chat.
 | Auto-download | **on** | Every supported link posted in the group is fetched without `/dl`: no "working" message, no quality menu (the max quality, or the best under the size cap), and failures are only logged, never posted. It only takes effect where Telegram delivers plain messages to the bot — **admin** or privacy mode **off** — which is why the greeting asks for admin. Messages from other bots are ignored, and the same link posted again within `AUTO_DEDUPE_SECONDS` (120 s) is downloaded once. Turn it off here if a group prefers `/dl` only. |
 | Max quality | best | Caps YouTube: `/dl` menus only show rungs up to the cap, auto mode downloads at the cap. `audio` always allowed. |
 | Platforms | all | Links from a disabled platform are refused with a short reply (`/dl`) or ignored (auto). |
+| Captions | on | Title (linked to the source), date · duration · views · likes · comments · channel, format and size, and the description in an expandable quote. `CAPTIONS=full\|short\|off` in `.env` sets the style for the whole bot; this toggle switches captions off for one group. |
 
 Taps on the keyboard are re-checked against the group's admin list and the chat the keyboard
 belongs to, so forwarding a settings message elsewhere does nothing. Anonymous admins

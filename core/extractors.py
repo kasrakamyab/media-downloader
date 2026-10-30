@@ -7,6 +7,7 @@ Both run off the event loop (thread / subprocess) and translate tool failures in
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -15,9 +16,26 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from core.captions import MediaMeta, from_gallerydl, from_ytdlp
 from core.contracts import ErrorCode, FormatOption, Quality
+from core.logging import get_logger
 from core.settings import Settings
-from core.worker import ExtractError, collect_files
+from core.worker import Extracted, ExtractError, collect_files
+
+log = get_logger("extractors")
+
+
+def gallerydl_meta(dest: Path, files: list[Path], platform: str, url: str) -> MediaMeta | None:
+    """Read the `--write-metadata` sidecar of the first file, if gallery-dl produced one."""
+    for candidate in (Path(str(files[0]) + ".json"), *sorted(dest.glob("*.json"))):
+        if candidate.is_file():
+            try:
+                data = json.loads(candidate.read_text(errors="replace"))
+            except ValueError:
+                continue
+            if isinstance(data, dict):
+                return from_gallerydl(data, platform, url)
+    return None
 
 
 @contextmanager
@@ -71,9 +89,17 @@ _NET_RE = re.compile(
 )
 
 
+NO_FORMAT = "requested format is not available"
+
+
 def classify(message: str) -> ErrorCode:
-    if "unsupported url" in message.lower():
+    lowered = message.lower()
+    if "unsupported url" in lowered:
         return ErrorCode.UNSUPPORTED_URL
+    if NO_FORMAT in lowered:
+        # Our selector matched nothing; says nothing about the post. Must not read as
+        # PRIVATE through the generic "not available" pattern below.
+        return ErrorCode.UNKNOWN
     if _RATE_RE.search(message):
         return ErrorCode.RATE_LIMITED
     if _NET_RE.search(message):  # before PRIVATE: a proxy 403 is the network, not the post
@@ -95,10 +121,23 @@ _HEIGHT = {Quality.P1080: 1080, Quality.P720: 720, Quality.P480: 480, Quality.P3
 
 
 def ytdlp_format(quality: Quality) -> str:
+    """Format selector: prefer mp4 video + m4a audio, but accept any video-only + any
+    audio-only pair (Pinterest HLS has video-only mp4 streams and an mp4 audio stream, no
+    m4a and no muxed format) before falling back to a muxed file. The size rung is applied
+    through `ytdlp_sort`, not here, so vertical videos aren't judged by their height."""
     if quality == Quality.AUDIO:
         return "ba[ext=m4a]/ba/b"
+    return "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b[ext=mp4]/b/bv*"
+
+
+def ytdlp_sort(quality: Quality) -> list[str]:
+    """`format_sort` for a rung: `res:<h>` prefers the best format whose *shorter* side is
+    at most h (so a 720x1280 portrait counts as 720p, not 1280p), then mp4/m4a, then
+    bitrate. Formats above the rung are still considered last, never excluded."""
+    if quality == Quality.AUDIO:
+        return ["abr", "ext:m4a"]
     h = _HEIGHT.get(quality, 720)
-    return f"bv*[height<={h}][ext=mp4]+ba[ext=m4a]/b[height<={h}][ext=mp4]/b[height<={h}]/b"
+    return [f"res:{h}", "ext:mp4:m4a", "tbr"]
 
 
 def ladder_for(quality: Quality) -> list[Quality]:
@@ -132,11 +171,13 @@ def ytdlp_common_opts(settings: Settings, cookies: str | None) -> dict:
 
 def _ytdlp_once(
     url: str, dest: Path, quality: Quality, settings: Settings, cookies: str | None
-) -> list[Path]:
+) -> tuple[list[Path], dict]:
+    """Download one rung; returns the files and yt-dlp's info dict (for the caption)."""
     import yt_dlp  # imported lazily: heavy, and tests don't need it
 
     opts: dict = ytdlp_common_opts(settings, cookies) | {
         "format": ytdlp_format(quality),
+        "format_sort": ytdlp_sort(quality),
         "outtmpl": str(dest / "%(id)s.%(ext)s"),
         "max_filesize": settings.max_file_bytes,
         "merge_output_format": "mp4" if quality != Quality.AUDIO else None,
@@ -145,29 +186,34 @@ def _ytdlp_once(
     }
     if settings.rate_limit:
         opts["ratelimit"] = yt_dlp.utils.parse_bytes(settings.rate_limit)
+    info: dict = {}
     try:
         with cookie_copy(cookies, dest) as jar:
             if jar:
                 opts["cookiefile"] = jar
             with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+                raw = ydl.extract_info(url, download=True)
+                info = ydl.sanitize_info(raw) if raw else {}
     except yt_dlp.utils.DownloadError as e:
         raise ExtractError(classify(str(e)), str(e)) from e
     except OSError as e:
         # Disk full, permissions, a mount gone read-only: a configuration problem, not
         # something a retry on the next rung would change.
         raise ExtractError(ErrorCode.UNKNOWN, f"filesystem error: {e}") from e
-    return collect_files(dest)
+    if info.get("_type") == "playlist":  # playlist_items=1: the one entry we fetched
+        entries = info.get("entries") or []
+        info = entries[0] if entries and isinstance(entries[0], dict) else {}
+    return collect_files(dest), info or {}
 
 
 async def ytdlp_download(
     url: str, dest: Path, quality: Quality, settings: Settings, cookies: str | None = None
-) -> list[Path]:
+) -> Extracted:
     """Walk the quality ladder until something under the size cap downloads."""
     last: ExtractError | None = None
     for rung in ladder_for(quality):
         try:
-            files = await asyncio.to_thread(_ytdlp_once, url, dest, rung, settings, cookies)
+            files, info = await asyncio.to_thread(_ytdlp_once, url, dest, rung, settings, cookies)
         except ExtractError as e:
             if e.code in {
                 ErrorCode.PRIVATE,
@@ -176,10 +222,13 @@ async def ytdlp_download(
                 ErrorCode.RATE_LIMITED,
             }:
                 raise
+            if NO_FORMAT in e.detail.lower():
+                log.info("no_matching_format", url=url, rung=rung, selector=ytdlp_format(rung))
             last = e
             continue
         if files:
-            return files
+            size = sum(f.stat().st_size for f in files)
+            return Extracted(files, meta=from_ytdlp(info, size) if info else None)
         # yt-dlp silently skips files over max_filesize: try the next rung.
         last = ExtractError(ErrorCode.TOO_LARGE, f"{rung} over size cap")
     raise last or ExtractError(ErrorCode.UNKNOWN, "ladder exhausted")
@@ -285,7 +334,8 @@ async def gallerydl_download(
     settings: Settings,
     cookies: str | None = None,
     max_items: int = 10,
-) -> list[Path]:
+    platform: str = "",
+) -> Extracted:
     cmd = [
         "gallery-dl",
         "--quiet",
@@ -300,6 +350,7 @@ async def gallerydl_download(
         "--retries",
         "1",
         "--no-part",
+        "--write-metadata",  # <file>.json next to each file: caption source
     ]
     if settings.rate_limit:
         cmd += ["--limit-rate", settings.rate_limit]
@@ -321,10 +372,8 @@ async def gallerydl_download(
             raise ExtractError(ErrorCode.SOURCE_DOWN, "gallery-dl timeout") from None
     stderr = err.decode(errors="replace")
     files = collect_files(dest)
-    if proc.returncode == 0 and files:
-        return files
-    if files:  # partial success (e.g. one item over the cap) is still a success
-        return files
+    if files:  # exit 0, or partial success (e.g. one item over the cap): still a success
+        return Extracted(files, meta=gallerydl_meta(dest, files, platform, url))
     code = _GDL_EXIT.get(proc.returncode or 1, ErrorCode.UNKNOWN)
     if proc.returncode in (1, 4):
         code = classify(stderr) if stderr.strip() else code
