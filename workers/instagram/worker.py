@@ -10,7 +10,7 @@ from pathlib import Path
 
 from core.contracts import ErrorCode, Job, Platform, Quality
 from core.extractors import gallerydl_download, ytdlp_download
-from core.instagram_embed import embed_download
+from core.instagram_embed import embed_download, og_download
 from core.logging import get_logger
 from core.settings import Settings
 from core.worker import ExtractError, build_worker_settings
@@ -28,6 +28,10 @@ async def _ytdlp(job: Job, dest: Path, settings: Settings, cookies: str | None) 
     return await ytdlp_download(job.url, dest, Quality.BEST, settings, cookies)
 
 
+async def _ogpage(job: Job, dest: Path, settings: Settings, cookies: str | None) -> list[Path]:
+    return await og_download(job.url, dest, settings)
+
+
 async def _embed(job: Job, dest: Path, settings: Settings, cookies: str | None) -> list[Path]:
     return await embed_download(job.url, dest, settings)
 
@@ -37,10 +41,13 @@ async def extract(job: Job, dest: Path, settings: Settings) -> list[Path]:
     # With a session, gallery-dl handles everything. Without one it hits the login wall on
     # almost all posts; yt-dlp still gets public reels, and the embed page gets public
     # photos and carousels, so the order follows what has a chance first.
-    # The embed page is a last try either way: from residential IPs it can carry public
-    # photos without a session, from data-center / VPN exits Instagram serves a login shell
-    # (seen live). It fails fast and never changes the error the user sees.
-    chain = (_gallerydl, _ytdlp, _embed) if cookies else (_ytdlp, _gallerydl, _embed)
+    # Cookie-less fallbacks come after the real extractors: the post page's og:image (single
+    # photos, first item of carousels; works from exits where the rest is walled) and then
+    # the embed page (full carousels from residential IPs, a login shell elsewhere). Both
+    # fail fast and never make the error the user sees worse.
+    chain = (
+        (_gallerydl, _ytdlp, _ogpage, _embed) if cookies else (_ytdlp, _gallerydl, _ogpage, _embed)
+    )
     first_error: ExtractError | None = None
     for step in chain:
         try:

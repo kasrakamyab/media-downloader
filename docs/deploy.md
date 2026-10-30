@@ -111,13 +111,16 @@ strip the common cases, but the fix is the file.
 The image ships `deno`, which yt-dlp needs for YouTube's JavaScript challenges; a "No
 supported JavaScript runtime" warning means an old image — rebuild.
 
-**"That platform wants a login" (`LOGIN_REQUIRED`).** **Instagram needs `IG_COOKIES_FILE`
-on any server.** Without a session the worker tries yt-dlp (public reels sometimes work),
-gallery-dl (login wall) and the public embed page, but from data-center and VPN IPs
-Instagram serves a generic login shell with no media for every post (verified live: 200 OK,
-~500 KB, identical for all posts, logged as `embed_shell_no_media`), so photo posts and
-carousels only work with cookies — the same situation as YouTube behind a data-center IP.
-The admin gets a 🔑 alert naming the variable to set. Fix: export cookies from a browser
+**"That platform wants a login" (`LOGIN_REQUIRED`).** Without a session the Instagram
+worker tries yt-dlp (reels), gallery-dl (usually a login wall), then two cookie-less
+fallbacks: the **post page's `og:image`/`og:video`** (a plain logged-out GET of
+`instagram.com/p/<id>/`; this served the full-size photo from a VPN exit where everything
+else was walled — single photos are covered, carousels give their first item only, logged as
+`og_first_item_only`) and the embed page (full carousels from residential IPs; from
+data-center / VPN exits a generic login shell, logged as `embed_shell_no_media`). Whether
+the og path works depends on the exit IP, so **on a server plan for `IG_COOKIES_FILE`** —
+the same situation as YouTube behind a data-center IP. The admin gets a 🔑 alert naming the
+variable to set. Fix: export cookies from a browser
 where a throwaway account is logged in (any "Get cookies.txt" extension, Netscape format),
 put the file in `./secrets/` and set `IG_COOKIES_FILE=/secrets/instagram.txt` (or
 `YT_COOKIES_FILE`). Use an account you don't care about; export from a private window and

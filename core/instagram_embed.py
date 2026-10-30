@@ -1,14 +1,16 @@
-"""Instagram's public embed page as a cookie-less last try.
+"""Cookie-less fallbacks for public Instagram posts.
 
-`https://www.instagram.com/p/<shortcode>/embed/captioned/` can be served without a session
-for public posts and then carries the media URLs (CDN links that need no cookies either):
-either in a JSON blob (`shortcode_media`, with `edge_sidecar_to_children` for carousels and
-`video_url` for videos) or, at minimum, as the `EmbeddedMediaImage` <img>.
+1. The post page itself (`instagram.com/p/<id>/`): a plain logged-out GET returns the
+   server-rendered page whose `og:image` is the full-size photo (and `og:video` for reels)
+   from exits where everything else is walled — verified live from a VPN exit. Single photos
+   are covered; for carousels it is the first item only.
+2. The embed page (`/p/<id>/embed/captioned/`): carries the full `shortcode_media` JSON
+   (carousel children, video_url) from residential IPs, but from data-center / VPN exits it
+   is a generic ~500 KB login shell with no media for every post (verified live). Kept as a
+   last try.
 
-It is IP-gated like the rest of Instagram: from data-center and VPN exits the page is a
-generic ~500 KB login shell with no media for every post (verified live), so on a server the
-reliable path is IG_COOKIES_FILE. This module fails fast in that case and leaves the error
-the user sees unchanged (LOGIN_REQUIRED).
+Both are IP-dependent; on a server the reliable path is IG_COOKIES_FILE. Both fail fast with
+LOGIN_REQUIRED when the page has no media, so the error the user sees never gets worse.
 """
 
 from __future__ import annotations
@@ -176,30 +178,115 @@ def _ext(item: EmbedItem, content_type: str | None) -> str:
     return ".mp4" if item.kind == "video" else ".jpg"
 
 
-async def fetch_embed_page(post_url: str, settings: Settings) -> str:
-    target = embed_url(post_url)
-    if not target:
-        raise ExtractError(ErrorCode.UNSUPPORTED_URL, post_url)
+async def _fetch_html(target: str, settings: Settings, what: str, headers: dict) -> str:
     timeout = aiohttp.ClientTimeout(total=settings.extract_timeout)
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
     try:
         async with (
             aiohttp.ClientSession(timeout=timeout, headers=headers) as session,
             session.get(target, proxy=settings.download_proxy, allow_redirects=True) as resp,
         ):
             if resp.status in (401, 403):
-                raise ExtractError(ErrorCode.LOGIN_REQUIRED, f"embed {resp.status}")
+                raise ExtractError(ErrorCode.LOGIN_REQUIRED, f"{what} {resp.status}")
             if resp.status == 404:
-                raise ExtractError(ErrorCode.PRIVATE, "embed 404")
+                raise ExtractError(ErrorCode.PRIVATE, f"{what} 404")
             if resp.status == 429:
-                raise ExtractError(ErrorCode.RATE_LIMITED, "embed 429")
+                raise ExtractError(ErrorCode.RATE_LIMITED, f"{what} 429")
             if resp.status >= 400:
-                raise ExtractError(ErrorCode.SOURCE_DOWN, f"embed {resp.status}")
+                raise ExtractError(ErrorCode.SOURCE_DOWN, f"{what} {resp.status}")
             if "/accounts/login" in str(resp.url):
-                raise ExtractError(ErrorCode.LOGIN_REQUIRED, "embed redirected to login")
+                raise ExtractError(ErrorCode.LOGIN_REQUIRED, f"{what} redirected to login")
             return await resp.text(errors="replace")
     except (aiohttp.ClientError, TimeoutError) as e:
-        raise ExtractError(ErrorCode.SOURCE_DOWN, f"embed fetch: {e}") from e
+        raise ExtractError(ErrorCode.SOURCE_DOWN, f"{what} fetch: {e}") from e
+
+
+async def fetch_embed_page(post_url: str, settings: Settings) -> str:
+    target = embed_url(post_url)
+    if not target:
+        raise ExtractError(ErrorCode.UNSUPPORTED_URL, post_url)
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
+    return await _fetch_html(target, settings, "embed", headers)
+
+
+# ---- the post page's Open Graph tags ----------------------------------------------------
+
+# What a plain logged-out GET of instagram.com/p/<id>/ gets from exits where the embed page
+# is a shell: the server-rendered page with og:image = the full-size photo (verified live).
+# No browser impersonation: a plain, honest client UA is what was tested.
+PAGE_UA = "Mozilla/5.0 (compatible; media-downloader-bot/1.0)"
+_OG_RE = re.compile(
+    r'<meta\s+(?:[^>]*?\s)?(?:property|name)="(og:[a-z:_]+)"\s+content="([^"]*)"|'
+    r'<meta\s+(?:[^>]*?\s)?content="([^"]*)"\s+(?:property|name)="(og:[a-z:_]+)"',
+    re.IGNORECASE,
+)
+_MEDIA_HOST_RE = re.compile(r"^https://[a-z0-9.-]*(?:cdninstagram\.com|fbcdn\.net)/", re.IGNORECASE)
+_CAROUSEL_HINT_RE = re.compile(r"carousel_media_count|edge_sidecar_to_children|GraphSidecar")
+
+
+def og_tags(page: str) -> dict[str, str]:
+    """First value of each og:* meta tag, HTML-unescaped."""
+    tags: dict[str, str] = {}
+    for m in _OG_RE.finditer(page):
+        key, value = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
+        tags.setdefault(key.lower(), html.unescape(value))
+    return tags
+
+
+def parse_post_page(page: str) -> tuple[list[EmbedItem], bool]:
+    """Media from the post page's Open Graph tags, plus whether the post looks like a
+    carousel (then og:image is only its first item). [] when the page is a login wall."""
+    tags = og_tags(page)
+    video = tags.get("og:video:secure_url") or tags.get("og:video")
+    image = tags.get("og:image")
+    items: list[EmbedItem] = []
+    if video and _MEDIA_HOST_RE.match(video):
+        items.append(EmbedItem(video, "video"))
+    elif (
+        image
+        and _MEDIA_HOST_RE.match(image)
+        and tags.get("og:type", "").lower()
+        in (
+            "article",
+            "photo",
+            "instapp:photo",
+            "video",
+            "video.other",
+            "",
+        )
+    ):
+        items.append(EmbedItem(image, "image"))
+    return items, bool(_CAROUSEL_HINT_RE.search(page))
+
+
+def post_page_url(post_url: str) -> str | None:
+    m = _SHORTCODE_RE.search(post_url)
+    return f"https://www.instagram.com/p/{m.group(1)}/" if m else None
+
+
+async def fetch_post_page(post_url: str, settings: Settings) -> str:
+    target = post_page_url(post_url)
+    if not target:
+        raise ExtractError(ErrorCode.UNSUPPORTED_URL, post_url)
+    return await _fetch_html(target, settings, "post page", {"User-Agent": PAGE_UA})
+
+
+async def og_download(post_url: str, dest: Path, settings: Settings) -> list[Path]:
+    """Cookie-less fallback #1: the post page's og:image / og:video. Covers single photos
+    fully; for carousels it is the first item only (logged)."""
+    page = await fetch_post_page(post_url, settings)
+    items, carousel = parse_post_page(page)
+    if not items:
+        log.info("og_no_media", url=post_url, bytes=len(page), title=_title(page))
+        raise ExtractError(ErrorCode.LOGIN_REQUIRED, "post page has no og:image (login wall)")
+    if carousel:
+        log.info("og_first_item_only", url=post_url, hint="carousel; rest needs a session")
+    await asyncio.to_thread(dest.mkdir, parents=True, exist_ok=True)
+    return await download_items(items, dest, settings)
+
+
+def _title(page: str) -> str:
+    m = re.search(r"<title>([^<]{0,80})", page, re.IGNORECASE)
+    return html.unescape(m.group(1)).strip() if m else ""
 
 
 async def download_items(items: list[EmbedItem], dest: Path, settings: Settings) -> list[Path]:
