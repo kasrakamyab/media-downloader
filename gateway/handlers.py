@@ -74,12 +74,43 @@ HELP = (
     "Limits: {active} downloads at a time, {hourly} per hour.\n"
     "For personal use only. Private content is refused."
 )
-GROUP_HELP = (
-    "👋 Thanks for adding me. In this group I act only when asked:\n"
-    "• <code>/dl &lt;link&gt;</code>\n"
-    "• reply to a message that has a link with <code>/dl</code>\n"
-    "• <code>@{bot} &lt;link&gt;</code>\n"
-    "I reply to the message that had the link. Add <code>audio</code> for sound only."
+
+
+def group_help(bot_username: str, can_see: bool, joined: bool = False) -> str:
+    """What works in this group right now. With privacy mode on and no admin rights Telegram
+    only delivers /commands and replies to the bot, so mentions and auto-download are listed
+    only when the bot can actually receive plain messages."""
+    bot = bot_username or "bot"
+    head = "👋 Thanks for adding me. " if joined else ""
+    ways = [
+        "• <code>/dl &lt;link&gt;</code>",
+        "• reply to a message that has a link with <code>/dl</code>",
+    ]
+    if can_see:
+        ways.append(f"• <code>@{bot} &lt;link&gt;</code>")
+        tail = (
+            "I can see links here, so admins can also turn on <b>auto-download</b> in "
+            "/settings and I'll fetch every supported link without being asked."
+        )
+    else:
+        tail = (
+            "<b>Make me an admin</b> so I can see links. Right now Telegram only shows me "
+            "/dl commands and replies to my messages; as an admin I also catch "
+            f"<code>@{bot} &lt;link&gt;</code> and admins can turn on auto-download in /settings."
+        )
+    return (
+        f"{head}Ask me with:\n" + "\n".join(ways) + "\nI reply to the message that had the "
+        f"link; add <code>audio</code> for sound only.\n\n{tail}"
+    )
+
+
+PROMOTED_TEXT = (
+    "Thanks for making me an admin! I can now see links here: mention me with "
+    "<code>@{bot} &lt;link&gt;</code>, or admins turn on auto-download in /settings."
+)
+DEMOTED_TEXT = (
+    "I've lost admin rights, so Telegram will only show me <code>/dl</code> commands and "
+    "replies to my messages again."
 )
 
 
@@ -182,18 +213,45 @@ def _help(settings: Settings) -> str:
     )
 
 
+async def bot_can_see(bot: Bot, chat_id: int, bot_can_read_all: bool) -> bool:
+    """Does Telegram deliver plain group messages to us here? Yes when privacy mode is off
+    globally, or when the bot is an admin of this chat."""
+    if bot_can_read_all:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id, bot.id)
+    except (TelegramForbiddenError, TelegramBadRequest) as e:
+        log.info("self_member_check_failed", chat_id=chat_id, error=str(e)[:100])
+        return False
+    return member.status == "administrator"
+
+
 @router.message(CommandStart())
-async def on_start(message: Message, settings: Settings, bot_username: str = "") -> None:
+async def on_start(
+    message: Message,
+    settings: Settings,
+    bot: Bot,
+    bot_username: str = "",
+    bot_can_read_all: bool = False,
+) -> None:
     if is_group(message):
-        await say(message, GROUP_HELP.format(bot=bot_username or "bot"))
+        can_see = await bot_can_see(bot, message.chat.id, bot_can_read_all)
+        await say(message, group_help(bot_username, can_see))
         return
     await message.answer("👋 Hi! " + _help(settings))
 
 
 @router.message(Command("help"))
-async def on_help(message: Message, settings: Settings, bot_username: str = "") -> None:
+async def on_help(
+    message: Message,
+    settings: Settings,
+    bot: Bot,
+    bot_username: str = "",
+    bot_can_read_all: bool = False,
+) -> None:
     if is_group(message):
-        await say(message, GROUP_HELP.format(bot=bot_username or "bot"))
+        can_see = await bot_can_see(bot, message.chat.id, bot_can_read_all)
+        await say(message, group_help(bot_username, can_see))
         return
     await message.answer(_help(settings))
 
@@ -245,26 +303,46 @@ async def on_stats(
 # ---- membership -----------------------------------------------------------------------
 
 
+async def _announce(bot: Bot, chat_id: int, text: str) -> None:
+    try:
+        await bot.send_message(chat_id, text)
+    except (TelegramForbiddenError, TelegramBadRequest) as e:
+        log.info("group_announce_failed", chat_id=chat_id, error=str(e)[:120])
+
+
 @router.my_chat_member()
 async def on_my_chat_member(
-    event: ChatMemberUpdated, bot: Bot, groups: GroupRegistry, bot_username: str = ""
+    event: ChatMemberUpdated,
+    bot: Bot,
+    groups: GroupRegistry,
+    bot_username: str = "",
+    bot_can_read_all: bool = False,
 ) -> None:
     chat = event.chat
     if chat.type not in GROUP_TYPES:
         return  # private block/unblock, channels: nothing to track yet
     old, new = event.old_chat_member.status, event.new_chat_member.status
+    # The update itself says whether we're an admin now; no extra API call needed.
+    can_see = bot_can_read_all or new == "administrator"
     if new in MEMBER_STATUSES and old not in MEMBER_STATUSES:
         await groups.add(chat.id, chat.title or "", chat.type, event.from_user.id)
-        log.info("group_joined", chat_id=chat.id, title=chat.title, by=event.from_user.id)
-        try:
-            await bot.send_message(chat.id, GROUP_HELP.format(bot=bot_username or "bot"))
-        except (TelegramForbiddenError, TelegramBadRequest) as e:
-            log.info("group_greeting_failed", chat_id=chat.id, error=str(e)[:120])
+        await groups.set_visibility(chat.id, can_see)
+        log.info(
+            "group_joined", chat_id=chat.id, title=chat.title, by=event.from_user.id, sees=can_see
+        )
+        await _announce(bot, chat.id, group_help(bot_username, can_see, joined=True))
     elif new in GONE_STATUSES and old not in GONE_STATUSES:
         await groups.remove(chat.id)
         log.info("group_left", chat_id=chat.id, title=chat.title, status=new)
     elif new == "administrator" and old != "administrator":
+        await groups.set_visibility(chat.id, True)
         log.info("group_promoted", chat_id=chat.id, title=chat.title)
+        await _announce(bot, chat.id, PROMOTED_TEXT.format(bot=bot_username or "bot"))
+    elif old == "administrator" and new in MEMBER_STATUSES:
+        await groups.set_visibility(chat.id, can_see)
+        log.info("group_demoted", chat_id=chat.id, title=chat.title)
+        if not can_see:
+            await _announce(bot, chat.id, DEMOTED_TEXT)
 
 
 @router.message(F.migrate_to_chat_id)

@@ -23,7 +23,7 @@ from gateway.handlers import (
     pending_key,
     probe_key,
 )
-from tests.fakes import FakeMessage, FakeQuery
+from tests.fakes import FakeBot, FakeMessage, FakeQuery
 
 YT = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 MENU = [
@@ -80,7 +80,7 @@ async def _queued_job(arq: ArqRedis, platform: Platform) -> Job:
 
 async def test_start(settings) -> None:
     m = FakeMessage("/start")
-    await on_start(m, settings)
+    await on_start(m, settings, FakeBot())
     assert "YouTube" in m.answers[0]
 
 
