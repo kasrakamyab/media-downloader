@@ -37,7 +37,10 @@ async def extract(job: Job, dest: Path, settings: Settings) -> list[Path]:
     # With a session, gallery-dl handles everything. Without one it hits the login wall on
     # almost all posts; yt-dlp still gets public reels, and the embed page gets public
     # photos and carousels, so the order follows what has a chance first.
-    chain = (_gallerydl, _ytdlp, _embed) if cookies else (_ytdlp, _embed, _gallerydl)
+    # The embed page is a last try either way: from residential IPs it can carry public
+    # photos without a session, from data-center / VPN exits Instagram serves a login shell
+    # (seen live). It fails fast and never changes the error the user sees.
+    chain = (_gallerydl, _ytdlp, _embed) if cookies else (_ytdlp, _gallerydl, _embed)
     first_error: ExtractError | None = None
     for step in chain:
         try:

@@ -222,7 +222,7 @@ async def test_worker_falls_through_to_embed_without_cookies(monkeypatch, settin
     settings.ig_cookies_file = None
     files = await ig.extract(_job(), tmp_path / "j", settings)
     assert [f.name for f in files] == ["01.jpg"]
-    assert calls == ["ytdlp", "embed"]  # embed before gallery-dl when there is no session
+    assert calls == ["ytdlp", "gallerydl", "embed"]  # embed is the last try either way
 
 
 async def test_worker_order_with_cookies_and_error_precedence(monkeypatch, settings, tmp_path):

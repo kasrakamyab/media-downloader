@@ -1,10 +1,14 @@
-"""Instagram's public embed page as a cookie-less fallback.
+"""Instagram's public embed page as a cookie-less last try.
 
-`https://www.instagram.com/p/<shortcode>/embed/captioned/` is served without a session for
-public posts and carries the media URLs (CDN links that need no cookies either): either in a
-JSON blob (`shortcode_media`, with `edge_sidecar_to_children` for carousels and `video_url`
-for videos) or, at minimum, as the `EmbeddedMediaImage` <img>. yt-dlp only handles videos
-and gallery-dl hits the login wall, so photo posts need this path.
+`https://www.instagram.com/p/<shortcode>/embed/captioned/` can be served without a session
+for public posts and then carries the media URLs (CDN links that need no cookies either):
+either in a JSON blob (`shortcode_media`, with `edge_sidecar_to_children` for carousels and
+`video_url` for videos) or, at minimum, as the `EmbeddedMediaImage` <img>.
+
+It is IP-gated like the rest of Instagram: from data-center and VPN exits the page is a
+generic ~500 KB login shell with no media for every post (verified live), so on a server the
+reliable path is IG_COOKIES_FILE. This module fails fast in that case and leaves the error
+the user sees unchanged (LOGIN_REQUIRED).
 """
 
 from __future__ import annotations
@@ -20,8 +24,11 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from core.contracts import ErrorCode
+from core.logging import get_logger
 from core.settings import Settings
 from core.worker import ExtractError
+
+log = get_logger("instagram.embed")
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -229,6 +236,14 @@ async def embed_download(post_url: str, dest: Path, settings: Settings) -> list[
     page = await fetch_embed_page(post_url, settings)
     items = parse_embed(page)
     if not items:
-        raise ExtractError(ErrorCode.LOGIN_REQUIRED, "embed page has no media")
+        # From data-center / VPN IPs Instagram answers 200 with a ~500 KB generic shell
+        # (login / consent markers, no media at all) for every post. Cookies are the fix.
+        log.info(
+            "embed_shell_no_media",
+            url=post_url,
+            bytes=len(page),
+            login_markers="accounts/login" in page or "UnavailableToast" in page,
+        )
+        raise ExtractError(ErrorCode.LOGIN_REQUIRED, "embed page is a login shell, no media")
     await asyncio.to_thread(dest.mkdir, parents=True, exist_ok=True)
     return await download_items(items, dest, settings)
