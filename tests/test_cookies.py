@@ -70,7 +70,12 @@ def fake_ytdlp(monkeypatch, tmp_path: Path):
             out.write_bytes(b"video")
 
         def extract_info(self, url, download=False):
-            return {"title": "t", "formats": []}
+            if download:  # the real one downloads and returns the info dict
+                self.download([url])
+            return {"title": "t", "formats": [], "ext": "mp4"}
+
+        def sanitize_info(self, info):
+            return dict(info)
 
         def __exit__(self, *exc):
             jar = self.opts.get("cookiefile")
@@ -91,10 +96,12 @@ async def test_download_with_readonly_cookies(
     fake_ytdlp, readonly_cookies: Path, settings, tmp_path: Path
 ) -> None:
     dest = tmp_path / "job1"
-    files = await ytdlp_download(
+    got = await ytdlp_download(
         "https://youtu.be/x", dest, Quality.P360, settings, str(readonly_cookies)
     )
+    files = got.files
     assert [f.name for f in files] == ["vid.mp4"]  # the cookie copy is not a "download"
+    assert got.meta is not None and got.meta.title == "t"  # info dict feeds the caption
     jar = fake_ytdlp["cookiefile"][0]
     assert jar != str(readonly_cookies) and jar.startswith(str(dest))
     assert fake_ytdlp["written"] == [jar]

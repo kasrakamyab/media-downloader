@@ -35,18 +35,27 @@ class FakeMessage:
         self.answers: list[str] = []
         self.replies: list[str] = []
         self.markups: list = []
+        self.deleted: list[int] = []  # ids of bot messages deleted via .delete()
+
+    def _sent(self) -> SimpleNamespace:
+        return SimpleNamespace(message_id=555, edit_text=self._edit, delete=self._delete)
 
     async def answer(self, text: str, **_) -> SimpleNamespace:
         self.answers.append(text)
-        return SimpleNamespace(message_id=555, edit_text=self._edit)
+        return self._sent()
 
-    async def reply(self, text: str, **_) -> SimpleNamespace:
+    async def reply(self, text: str, reply_markup=None, **_) -> SimpleNamespace:
         self.replies.append(text)
-        return SimpleNamespace(message_id=555, edit_text=self._edit)
+        if reply_markup is not None:
+            self.markups.append(reply_markup)
+        return self._sent()
 
     async def _edit(self, text: str, reply_markup=None, **_) -> None:
         self.replies.append(text)
         self.markups.append(reply_markup)
+
+    async def _delete(self) -> None:
+        self.deleted.append(555)
 
 
 class FakeQuery:
