@@ -76,12 +76,27 @@ def _date_from_timestamp(ts: object) -> str | None:
     return datetime.fromtimestamp(n, UTC).date().isoformat()
 
 
+def _short_side(info: dict) -> int | None:
+    """The downloaded video's resolution label: the *shorter* side (a 720x1280 portrait is
+    720p), taken from the video stream that was actually chosen when yt-dlp merged a pair
+    (the top-level width/height can describe the source, e.g. 1080x1920 for a Short)."""
+    width, height = _int(info.get("width")), _int(info.get("height"))
+    for f in info.get("requested_formats") or []:
+        if isinstance(f, dict) and f.get("vcodec") not in (None, "none"):
+            width, height = _int(f.get("width")) or width, _int(f.get("height")) or height
+            break
+    if width and height:
+        return min(width, height)
+    return height or width
+
+
 def from_ytdlp(info: dict, filesize: int | None = None) -> MediaMeta:
     fmt = None
     if info.get("ext"):
         fmt = str(info["ext"])
-        if info.get("height"):
-            fmt += f" {int(info['height'])}p"
+        res = _short_side(info)
+        if res:
+            fmt += f" {res}p"
         elif info.get("abr") or info.get("acodec") not in (None, "none"):
             fmt += " audio"
     return MediaMeta(

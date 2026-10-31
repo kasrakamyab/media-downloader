@@ -68,7 +68,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api,pot-provider
       no_proxy: localhost,127.0.0.1,redis,telegram-bot-api,pot-provider
-      WORKER_CONCURRENCY: ${YT_CONCURRENCY:-3}
+      WORKER_CONCURRENCY: ${YT_CONCURRENCY:-2}
+      COOKIE_STATE_DIR: /state  # keeps cookie rotations; see core/extractors.cookie_copy
       POT_PROVIDER_URL: ${POT_PROVIDER_URL:-http://pot-provider:4416}
     depends_on:
       redis:
@@ -77,8 +78,9 @@ services:
         condition: service_started
     volumes:
       - ./secrets:/secrets:ro
+      - cookie-state:/state
     healthcheck: *worker-health
-    mem_limit: 512m
+    mem_limit: 1536m
 
   worker-instagram:
     <<: *service
@@ -88,8 +90,10 @@ services:
       NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api
       no_proxy: localhost,127.0.0.1,redis,telegram-bot-api
       WORKER_CONCURRENCY: ${IG_CONCURRENCY:-4}
+      COOKIE_STATE_DIR: /state  # keeps cookie rotations; see core/extractors.cookie_copy
     volumes:
       - ./secrets:/secrets:ro
+      - cookie-state:/state
     healthcheck: *worker-health
     mem_limit: 384m
 
@@ -101,8 +105,10 @@ services:
       NO_PROXY: localhost,127.0.0.1,redis,telegram-bot-api
       no_proxy: localhost,127.0.0.1,redis,telegram-bot-api
       WORKER_CONCURRENCY: ${PIN_CONCURRENCY:-4}
+      COOKIE_STATE_DIR: /state  # keeps cookie rotations; see core/extractors.cookie_copy
     volumes:
       - ./secrets:/secrets:ro
+      - cookie-state:/state
     healthcheck: *worker-health
     mem_limit: 256m
 
@@ -125,3 +131,4 @@ services:
 volumes:
   redis-data:
   bot-api-data:
+  cookie-state:
