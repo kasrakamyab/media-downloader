@@ -20,7 +20,8 @@ COPY gateway ./gateway
 COPY workers ./workers
 RUN pip install .
 
-RUN useradd -m bot && mkdir -p /tmp/jobs && chown bot:bot /tmp/jobs
+# /state: the cookie-state volume; a fresh named volume copies this ownership.
+RUN useradd -m bot && mkdir -p /tmp/jobs /state && chown bot:bot /tmp/jobs /state
 USER bot
 # deno caches its own files; give it a writable home.
 ENV DENO_DIR=/home/bot/.cache/deno

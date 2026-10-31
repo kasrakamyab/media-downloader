@@ -7,13 +7,16 @@ Both run off the event loop (thread / subprocess) and translate tool failures in
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import http.cookiejar
 import json
 import os
 import re
 import shutil
 import tempfile
+import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from core.captions import MediaMeta, from_gallerydl, from_ytdlp
@@ -39,12 +42,19 @@ def gallerydl_meta(dest: Path, files: list[Path], platform: str, url: str) -> Me
 
 
 @contextmanager
-def cookie_copy(cookies: str | None, workdir: Path) -> Iterator[str | None]:
+def cookie_copy(
+    cookies: str | None, workdir: Path, state_dir: str | None = None
+) -> Iterator[str | None]:
     """Yield a private, writable copy of a cookies file (or None when there is none).
 
     yt-dlp and gallery-dl both write refreshed cookies back to the file they were given on
     exit. `./secrets` is mounted read-only on purpose, so hand them a per-call copy inside
     the job folder and let the original stay untouched.
+
+    With `state_dir` (COOKIE_STATE_DIR), the copy comes from a writable state jar instead,
+    and after a call that didn't raise, the cookies the site changed are merged back into
+    it. YouTube rotates its session cookies (__Secure-*PSIDTS ...) every few hours; a jar
+    that never takes the rotations is revoked, which is what killed fresh exports in ~2 h.
     """
     if not cookies:
         yield None
@@ -52,15 +62,104 @@ def cookie_copy(cookies: str | None, workdir: Path) -> Iterator[str | None]:
     src = Path(cookies)
     if not src.is_file():
         raise ExtractError(ErrorCode.UNKNOWN, f"cookies file missing: {cookies}")
+    state = _seed_state_jar(src, Path(state_dir)) if state_dir else None
     workdir.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="cookies-", suffix=".txt", dir=workdir)
     os.close(fd)
     try:
-        shutil.copyfile(src, tmp)
+        with _jar_lock(state) if state else nullcontext():
+            shutil.copyfile(state or src, tmp)
         os.chmod(tmp, 0o600)
+        before = _read_jar(Path(tmp)) if state else {}
         yield tmp
+        if state:
+            _merge_rotations(state, before, Path(tmp))
     finally:
         with_suppress_unlink(tmp)
+
+
+# A cookie's identity in a jar, and the parts of it a rotation changes.
+_CookieKey = tuple[str, str, str]  # domain, path, name
+
+
+def _read_jar(path: Path) -> dict[_CookieKey, http.cookiejar.Cookie]:
+    """Parse a Netscape jar (session cookies and #HttpOnly_ lines included)."""
+    jar = http.cookiejar.MozillaCookieJar(str(path))
+    try:
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except (OSError, http.cookiejar.LoadError):
+        return {}
+    return {(c.domain, c.path, c.name): c for c in jar}
+
+
+@contextmanager
+def _jar_lock(state: Path) -> Iterator[None]:
+    """Exclusive lock on the state jar, shared by every worker on the same volume."""
+    with open(state.with_name(state.name + ".lock"), "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _seed_state_jar(src: Path, state_dir: Path) -> Path:
+    """The state jar for `src`, (re)seeded from it when it is new or `src` was replaced.
+
+    The `.seed` sidecar remembers which export the jar came from (mtime + size), so a
+    fresh export dropped into ./secrets takes over, while the rotations of the current
+    one are kept across restarts.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state = state_dir / src.name
+    seed = state_dir / (src.name + ".seed")
+    st = src.stat()
+    stamp = f"{st.st_mtime_ns} {st.st_size}"
+    with _jar_lock(state):
+        current = seed.read_text().strip() if seed.is_file() else None
+        if current != stamp or not state.is_file():
+            _atomic_copy(src, state)
+            seed.write_text(stamp)
+            log.info("cookie_state_seeded", jar=str(state))
+    return state
+
+
+def _merge_rotations(
+    state: Path, before: dict[_CookieKey, http.cookiejar.Cookie], after_path: Path
+) -> None:
+    """Write the cookies this call changed (new value or expiry, or new cookies) into the
+    state jar. Only the changes: a job that started from an older jar must not undo a
+    rotation another job merged meanwhile. Expired cookies and deletions are ignored."""
+    after = _read_jar(after_path)
+    now = time.time()
+    changed = [
+        c
+        for key, c in after.items()
+        if (old := before.get(key)) is None or (old.value, old.expires) != (c.value, c.expires)
+        if c.expires is None or c.expires > now
+    ]
+    if not changed:
+        return
+    with _jar_lock(state):
+        jar = http.cookiejar.MozillaCookieJar(str(state))
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+        except (OSError, http.cookiejar.LoadError):
+            return  # never replace a jar we can't read with a partial one
+        for c in changed:
+            jar.set_cookie(c)
+        tmp = state.with_name(state.name + ".tmp")
+        jar.save(str(tmp), ignore_discard=True, ignore_expires=True)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, state)
+    log.info("cookie_rotations_saved", jar=str(state), changed=len(changed))
+
+
+def _atomic_copy(src: Path, dst: Path) -> None:
+    tmp = dst.with_name(dst.name + ".tmp")
+    shutil.copyfile(src, tmp)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, dst)
 
 
 def with_suppress_unlink(path: str) -> None:
@@ -226,7 +325,7 @@ def _ytdlp_once(
     warnings = YtdlpLog()
     opts["logger"] = warnings
     try:
-        with cookie_copy(cookies, dest) as jar:
+        with cookie_copy(cookies, dest, settings.cookie_state_dir) as jar:
             if jar:
                 opts["cookiefile"] = jar
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -346,7 +445,7 @@ def _ytdlp_probe_sync(url: str, settings: Settings, cookies: str | None) -> tupl
 
     opts = ytdlp_common_opts(settings, cookies) | {"skip_download": True}
     try:
-        with cookie_copy(cookies, Path(settings.job_dir)) as jar:
+        with cookie_copy(cookies, Path(settings.job_dir), settings.cookie_state_dir) as jar:
             if jar:
                 opts["cookiefile"] = jar
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -414,7 +513,7 @@ async def gallerydl_download(
         cmd += ["--proxy", settings.download_proxy]
 
     # gallery-dl writes refreshed cookies back too (cookies-update), so it gets a copy.
-    with cookie_copy(cookies, dest) as jar:
+    with cookie_copy(cookies, dest, settings.cookie_state_dir) as jar:
         if jar:
             cmd += ["--cookies", jar]
         cmd.append(url)

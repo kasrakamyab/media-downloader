@@ -154,8 +154,18 @@ order matters for YouTube):
    "The provided YouTube account cookies are no longer valid".
 4. Put the file in `./secrets/` (owned by uid 1000, see above) and set
    `YT_COOKIES_FILE=/secrets/youtube.txt` / `IG_COOKIES_FILE=/secrets/instagram.txt`.
+5. Use the cookies from the server only. Testing the same export from another IP (your
+   laptop, a VPN) while the server uses it looks like a stolen session and gets it revoked.
 
-When the cookies die, the same 🔑 alert tells you; repeat the four steps.
+The site keeps rotating the session while the bot uses it (YouTube refreshes
+`__Secure-*PSIDTS` every few hours), and a jar that never takes those rotations is revoked
+within hours. The workers keep them in a writable copy on the `cookie-state` volume
+(`COOKIE_STATE_DIR=/state`, set in `docker-compose.yml`): each job starts from that copy and
+merges back the cookies the site changed. `./secrets` stays read-only. Dropping a newer
+export into `./secrets` replaces the copy on the next job (log: `cookie_state_seeded`);
+`cookie_rotations_saved` means a rotation was kept.
+
+When the cookies die anyway, the same 🔑 alert tells you; repeat the steps.
 
 **YouTube: "Requested format is not available" / only storyboards, and `dmesg` shows
 `Killed process (deno)`.** The YouTube worker runs deno to solve YouTube's JavaScript
