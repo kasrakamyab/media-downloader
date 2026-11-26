@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     yt_cookies_file: str | None = Field(default=None, alias="YT_COOKIES_FILE")
     ig_cookies_file: str | None = Field(default=None, alias="IG_COOKIES_FILE")
     pin_cookies_file: str | None = Field(default=None, alias="PIN_COOKIES_FILE")
+    # Writable copy of each cookies file that keeps the session rotations sites send back
+    # (see extractors.cookie_copy). Unset: every job starts from the export in ./secrets.
+    cookie_state_dir: str | None = Field(default=None, alias="COOKIE_STATE_DIR")
 
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_json: bool = Field(default=False, alias="LOG_JSON")
@@ -84,6 +87,7 @@ class Settings(BaseSettings):
         "yt_cookies_file",
         "ig_cookies_file",
         "pin_cookies_file",
+        "cookie_state_dir",
         mode="before",
     )
     @classmethod

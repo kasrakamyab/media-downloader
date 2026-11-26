@@ -108,13 +108,12 @@ async def run_polling() -> None:
             await runner.cleanup()
 
 
-def run_webhook() -> None:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    dp, settings, bot = loop.run_until_complete(build())
-    probe = health_probe(dp["arq"], dp["breaker"])
+def webhook_startup(bot: Bot, settings: Settings):
+    """Startup hook for webhook mode. aiogram calls startup handlers with keyword
+    arguments only (bot=, dispatcher=, …), so the hook must accept **kwargs — a positional
+    parameter made it crash with "missing 1 required positional argument"."""
 
-    async def on_startup(_: Dispatcher) -> None:
+    async def on_startup(**_: Any) -> None:
         await bot.set_webhook(
             settings.webhook_url,
             secret_token=settings.webhook_secret or None,
@@ -123,11 +122,22 @@ def run_webhook() -> None:
         )
         log.info("gateway_started", mode="webhook", url=settings.webhook_url)
 
+    return on_startup
+
+
+def run_webhook() -> None:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    dp, settings, bot = loop.run_until_complete(build())
+    probe = health_probe(dp["arq"], dp["breaker"])
+    if not settings.webhook_url:
+        raise SystemExit("MODE=webhook needs WEBHOOK_URL (https://<domain>/webhook)")
+
     async def health(_: web.Request) -> web.Response:
         body = await probe()
         return web.json_response(body, status=200 if body["ok"] else 503)
 
-    dp.startup.register(on_startup)
+    dp.startup.register(webhook_startup(bot, settings))
 
     app = web.Application()
     app.router.add_get("/health", health)

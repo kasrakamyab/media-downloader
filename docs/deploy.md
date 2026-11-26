@@ -1,6 +1,9 @@
 # Deploying to a VPS (step 11)
 
-One 2 vCPU / 4 GB box (Hetzner CX22 class) runs everything. Ubuntu 24.04 assumed.
+One 2 vCPU / 4 GB box (Hetzner CX22/CX23 class) runs everything. Ubuntu 24.04 assumed.
+Memory plan on 4 GB: `worker-youtube` 1.5 GB (deno solves YouTube's JS challenges inside
+each job; below ~1 GB it gets OOM-killed and downloads fail), the other two workers ~0.6 GB,
+gateway + Redis + Caddy + pot-provider ~0.7 GB, the rest for the OS and page cache.
 
 ## One-time setup
 
@@ -26,12 +29,25 @@ LOG_JSON=true
 IMAGE=ghcr.io/kasrakamyab/media-bot:latest
 ```
 
-Then, if the GHCR package is private, `docker login ghcr.io` once, and:
+**No domain?** Use [sslip.io](https://sslip.io): for a server at 188.245.13.109 set
+`DOMAIN=188-245-13-109.sslip.io` and `WEBHOOK_URL=https://188-245-13-109.sslip.io/webhook`.
+It resolves to the IP with no setup and Caddy gets a Let's Encrypt certificate for it like
+for any other name. (Polling mode works too and needs no domain at all; webhook mode just
+reacts faster and avoids one long-poll connection.)
+
+**Cookies:** `./secrets` is read inside the containers by the `bot` user (uid 1000). Make the
+folder and files readable by it — `sudo chown -R 1000:1000 secrets && chmod 700 secrets &&
+chmod 600 secrets/*` — or the workers log `cookies_file_missing` / permission errors.
+
+The image is pulled from the GitHub Container Registry. **Make the package public once**
+(github.com → your profile → Packages → `media-bot` → Package settings → Change visibility →
+Public); after that neither the server nor the deploy workflow needs `docker login`. For a
+private package, `docker login ghcr.io` on the server with a token that has `read:packages`.
 
 ```bash
 docker compose -f docker-compose.yml -f deploy/compose.prod.yml pull
 docker compose -f docker-compose.yml -f deploy/compose.prod.yml up -d
-curl -s https://bot.example.com/health
+curl -s https://$DOMAIN/health          # through Caddy; the gateway port isn't published
 ```
 
 Caddy gets the certificate on first start. Send the bot a link.
@@ -41,8 +57,14 @@ Caddy gets the certificate on first start. Send the bot a link.
 `.github/workflows/deploy.yml` builds the image, runs the tests, pushes
 `ghcr.io/<owner>/media-bot:<timestamp>-<sha>` and `:latest`, then ssh-es in and runs
 `compose pull && up -d`. Add these repository secrets: `DEPLOY_HOST`, `DEPLOY_USER`,
-`DEPLOY_SSH_KEY`, `DEPLOY_PATH` (`/opt/media-bot`). A push to `main` is live in about
-2–3 minutes. The same workflow runs every Monday so yt-dlp and gallery-dl stay current.
+`DEPLOY_SSH_KEY`, `DEPLOY_PATH` (`/opt/media-bot`). Without `DEPLOY_HOST` the workflow only
+builds and pushes the image. A push to `main` is live in about 2–3 minutes; the workflow
+checks the gateway's `/health` from inside its container (in prod the port isn't published
+on the host) and prints the gateway log if that fails. The same workflow runs every Monday
+so yt-dlp and gallery-dl stay current.
+
+The server checkout is reset to `origin/main` on every deploy; untracked files such as a
+local `compose.server.yml` survive that, tracked files you edited on the box do not.
 
 Rollback is one command — pin the previous tag and re-up:
 
@@ -122,12 +144,37 @@ never caches it, and raises the 🔑 alert; carousels give their first item only
 data-center / VPN exits a generic login shell, logged as `embed_shell_no_media`). Whether
 the og path works depends on the exit IP, so **on a server plan for `IG_COOKIES_FILE`** —
 the same situation as YouTube behind a data-center IP. The admin gets a 🔑 alert naming the
-variable to set. Fix: export cookies from a browser
-where a throwaway account is logged in (any "Get cookies.txt" extension, Netscape format),
-put the file in `./secrets/` and set `IG_COOKIES_FILE=/secrets/instagram.txt` (or
-`YT_COOKIES_FILE`). Use an account you don't care about; export from a private window and
-don't keep using that session in the browser, or the cookies rotate and expire. When the
-cookies die, the same 🔑 alert tells you.
+variable to set. Fix: a cookies file from a throwaway account, exported **this way** (the
+order matters for YouTube):
+
+1. Open a private/incognito window, log in to the throwaway account.
+2. Export the cookies with any "Get cookies.txt" extension (Netscape format).
+3. **Close the incognito window right away** and don't log in with that account anywhere
+   else. A browser that stays logged in rotates the session cookies, and yt-dlp then reports
+   "The provided YouTube account cookies are no longer valid".
+4. Put the file in `./secrets/` (owned by uid 1000, see above) and set
+   `YT_COOKIES_FILE=/secrets/youtube.txt` / `IG_COOKIES_FILE=/secrets/instagram.txt`.
+5. Use the cookies from the server only. Testing the same export from another IP (your
+   laptop, a VPN) while the server uses it looks like a stolen session and gets it revoked.
+
+The site keeps rotating the session while the bot uses it (YouTube refreshes
+`__Secure-*PSIDTS` every few hours), and a jar that never takes those rotations is revoked
+within hours. The workers keep them in a writable copy on the `cookie-state` volume
+(`COOKIE_STATE_DIR=/state`, set in `docker-compose.yml`): each job starts from that copy and
+merges back the cookies the site changed. `./secrets` stays read-only. Dropping a newer
+export into `./secrets` replaces the copy on the next job (log: `cookie_state_seeded`);
+`cookie_rotations_saved` means a rotation was kept.
+
+When the cookies die anyway, the same 🔑 alert tells you; repeat the steps.
+
+**YouTube: "Requested format is not available" / only storyboards, and `dmesg` shows
+`Killed process (deno)`.** The YouTube worker runs deno to solve YouTube's JavaScript
+challenges; when the container's memory limit kills it, yt-dlp is left with storyboard images
+only. The worker idles at ~165 MB and each job's deno run needs a few hundred MB more, so
+`worker-youtube` ships with `mem_limit: 1536m` and `YT_CONCURRENCY=2` (plan ~1.5 GB of the
+box for it). The job's error detail now says "YouTube JS challenge solver failed … usually
+OOM-killed" and the worker logs `js_runtime_failed`; if you see it, raise the limit or lower
+the concurrency rather than looking at formats.
 
 **"The upload to Telegram timed out" (`UPLOAD_FAILED`).** The download worked; the push
 to `api.telegram.org` was too slow for the request timeout. The timeout scales with file

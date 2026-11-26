@@ -141,3 +141,88 @@ def test_ro_fixture_is_really_readonly_for_non_root(readonly_cookies: Path) -> N
         pytest.skip("root ignores permission bits")
     with pytest.raises(PermissionError):
         readonly_cookies.write_text("x")
+
+
+# --- COOKIE_STATE_DIR: keep the rotations a site sends back -------------------------------
+
+HEADER = "# Netscape HTTP Cookie File\n"
+
+
+def _line(name: str, value: str, expires: int = 4102444800) -> str:
+    return f".youtube.com\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}\n"
+
+
+def _values(path: Path) -> dict[str, str]:
+    out = {}
+    for raw in path.read_text().splitlines():
+        parts = raw.split("\t")
+        if len(parts) == 7 and not raw.startswith("# "):
+            out[parts[5]] = parts[6]
+    return out
+
+
+@pytest.fixture
+def export(tmp_path: Path) -> Path:
+    f = tmp_path / "secrets" / "youtube.txt"
+    f.parent.mkdir()
+    f.write_text(HEADER + _line("SID", "s1") + _line("PSIDTS", "t1"))
+    return f
+
+
+def _rotate(jar: str, **values: str) -> None:
+    """What yt-dlp does on close: rewrite the whole jar with the cookies it now holds."""
+    current = _values(Path(jar)) | values
+    Path(jar).write_text(HEADER + "".join(_line(k, v) for k, v in current.items()))
+
+
+def test_rotation_is_kept_and_export_untouched(export: Path, tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    with cookie_copy(str(export), tmp_path / "j1", str(state)) as jar:
+        assert _values(Path(jar)) == {"SID": "s1", "PSIDTS": "t1"}
+        _rotate(jar, PSIDTS="t2")
+    assert _values(state / "youtube.txt") == {"SID": "s1", "PSIDTS": "t2"}
+    assert _values(export) == {"SID": "s1", "PSIDTS": "t1"}
+    # the next job starts from the rotated jar, not from the export
+    with cookie_copy(str(export), tmp_path / "j2", str(state)) as jar:
+        assert _values(Path(jar))["PSIDTS"] == "t2"
+
+
+def test_older_job_does_not_undo_a_newer_rotation(export: Path, tmp_path: Path) -> None:
+    state = str(tmp_path / "state")
+    with cookie_copy(str(export), tmp_path / "a", state) as jar_a:
+        with cookie_copy(str(export), tmp_path / "b", state) as jar_b:
+            _rotate(jar_b, PSIDTS="t2")
+        _rotate(jar_a)  # A saves its whole jar, still holding t1: nothing it changed
+    assert _values(tmp_path / "state" / "youtube.txt")["PSIDTS"] == "t2"
+
+
+def test_new_export_reseeds_the_state(export: Path, tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    with cookie_copy(str(export), tmp_path / "j1", str(state)) as jar:
+        _rotate(jar, PSIDTS="t2")
+    export.write_text(HEADER + _line("SID", "fresh") + _line("PSIDTS", "f1"))
+    os.utime(export, ns=(export.stat().st_atime_ns, export.stat().st_mtime_ns + 10**9))
+    with cookie_copy(str(export), tmp_path / "j2", str(state)) as jar:
+        assert _values(Path(jar)) == {"SID": "fresh", "PSIDTS": "f1"}
+
+
+def test_failed_call_and_expired_cookies_are_not_merged(export: Path, tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    with pytest.raises(RuntimeError), cookie_copy(str(export), tmp_path / "j1", str(state)) as jar:
+        _rotate(jar, PSIDTS="bad")
+        raise RuntimeError("download failed")
+    assert _values(state / "youtube.txt")["PSIDTS"] == "t1"
+    with cookie_copy(str(export), tmp_path / "j2", str(state)) as jar:
+        Path(jar).write_text(HEADER + _line("SID", "s1") + _line("PSIDTS", "gone", expires=1))
+    assert _values(state / "youtube.txt")["PSIDTS"] == "t1"
+
+
+async def test_download_uses_the_state_dir_from_settings(
+    fake_ytdlp, readonly_cookies: Path, settings, tmp_path: Path
+) -> None:
+    settings.cookie_state_dir = str(tmp_path / "state")
+    await ytdlp_download(
+        "https://youtu.be/x", tmp_path / "j", Quality.P360, settings, str(readonly_cookies)
+    )
+    assert (tmp_path / "state" / "youtube.txt").is_file()
+    assert readonly_cookies.read_text() == ORIGINAL
